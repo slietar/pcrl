@@ -1,6 +1,7 @@
+mod counters;
 mod iterator;
 
-use iterator::CharIteratorMarker;
+use iterator::{CharIteratorMarker, CharCounter};
 
 use crate::iterator::CharIterator;
 
@@ -8,7 +9,7 @@ use crate::iterator::CharIterator;
 fn main() -> Result<(), ()> {
     // let mut parser = Parser::new("[5, 6,foo, null]");
     // let result = parser.accept_expr(['\n', '\n']);
-    let mut parser = Parser::new("- 3 # Hello\n-4");
+    let mut parser: Parser<'_, counters::LspUtf16> = Parser::new("- 3 # Hello\n- 4");
 
     parser.accept_line()?;
     parser.accept_line()?;
@@ -29,20 +30,14 @@ pub enum TokenKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Span(pub CharIteratorMarker, pub CharIteratorMarker);
+pub struct Span<T: CharCounter>(pub CharIteratorMarker<T>, pub CharIteratorMarker<T>);
 
-impl Span {
-    fn point(marker: &CharIteratorMarker) -> Self {
+impl<T: CharCounter> Span<T> {
+    fn point(marker: &CharIteratorMarker<T>) -> Self {
         Self(*marker, *marker)
     }
 }
 
-
-#[derive(Debug)]
-pub struct Token {
-    pub kind: TokenKind,
-    pub span: Span,
-}
 
 #[derive(Debug)]
 struct Indent {
@@ -68,26 +63,26 @@ enum IndentKind {
 
 
 #[derive(Debug)]
-enum StackItem {
-    List(Vec<Object>),
+enum StackItem<T: CharCounter> {
+    List(Vec<Object<T>>),
     Map {
-        entries: Vec<(String, Object)>,
+        entries: Vec<(String, Object<T>)>,
         key: Option<String>,
     },
     String(String),
 }
 
 #[derive(Debug)]
-struct Parser<'a> {
-    chars: CharIterator<'a>,
-    errors: Vec<Error>,
+struct Parser<'a, T: CharCounter> {
+    chars: CharIterator<'a, T>,
+    errors: Vec<Error<T>>,
     indent: Option<Indent>,
-    stack: Vec<StackItem>,
+    stack: Vec<StackItem<T>>,
 }
 
-impl<'a> Parser<'a> {
-    fn new(contents: &'a str) -> Parser<'a> {
-        Parser {
+impl<'a, T: CharCounter> Parser<'a, T> {
+    fn new(contents: &'a str) -> Self {
+        Self {
             chars: CharIterator::new(contents),
             errors: Vec::new(),
             indent: None,
@@ -110,29 +105,29 @@ impl<'a> Parser<'a> {
 
 
 #[derive(Debug)]
-pub enum Value {
+pub enum Value<T: CharCounter> {
     Integer(i64),
-    List(Vec<Object>),
+    List(Vec<Object<T>>),
     Null,
     String(String),
 }
 
 #[derive(Debug)]
-pub struct Object {
-    pub span: Span,
-    pub value: Value,
+pub struct Object<T: CharCounter> {
+    pub span: Span<T>,
+    pub value: Value<T>,
 }
 
 #[derive(Debug)]
-pub enum Error {
-    InvalidIndent(Span),
-    InvalidIndentSize(Span),
-    MissingListClose(Span),
+pub enum Error<T: CharCounter> {
+    InvalidIndent(Span<T>),
+    InvalidIndentSize(Span<T>),
+    MissingListClose(Span<T>),
 }
 
-impl Parser<'_> {
+impl<'a, T: CharCounter> Parser<'a, T> {
     // Only returns None if the end of the file is reached
-    fn accept_expr(&mut self, break_chars: [char; 2]) -> Result<Option<Object>, ()> {
+    fn accept_expr(&mut self, break_chars: [char; 2]) -> Result<Option<Object<T>>, ()> {
         self.pop_whitespace();
 
         let start_marker = self.chars.marker();
@@ -200,17 +195,19 @@ impl Parser<'_> {
 
         let indent = match self.chars.peek() {
             Some(' ') => {
-                self.chars.pop_while(|ch| ch == ' ');
+                let spaces = self.chars.pop_while(|ch| ch == ' ');
+
                 Some(Indent {
                     kind: IndentKind::Spaces,
-                    size: self.chars.char_offset - start_marker.char_offset,
+                    size: spaces.len(),
                 })
             },
             Some('\t') => {
-                self.chars.pop_while(|ch| ch == '\t');
+                let spaces = self.chars.pop_while(|ch| ch == '\t');
+
                 Some(Indent {
                     kind: IndentKind::Tabs,
-                    size: self.chars.char_offset - start_marker.char_offset,
+                    size: spaces.len(),
                 })
             },
             _ => None,
@@ -364,7 +361,7 @@ impl Parser<'_> {
     //     }
     // }
 
-    fn accept_key(&mut self) -> Option<(String, Span)>{
+    fn accept_key(&mut self) -> Option<(String, Span<T>)>{
         match self.chars.peek() {
             Some('A'..='Z' | 'a'..='z' | '_') => {
                 let key_start_marker = self.chars.marker();

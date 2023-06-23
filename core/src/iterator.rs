@@ -1,20 +1,26 @@
 use std::cell::Cell;
 
 
+pub trait CharCounter: Clone + Copy + std::fmt::Debug {
+    fn new() -> Self;
+    fn consume(&mut self, ch: char);
+}
+
+
 #[derive(Debug)]
-pub struct CharIterator<'a> {
+pub struct CharIterator<'a, T: CharCounter> {
     bytes: &'a [u8],
     pub byte_offset: usize,
-    pub char_offset: usize,
+    counter: T,
     last_byte_size: Cell<Option<usize>>,
 }
 
-impl<'a> CharIterator<'a> {
-    pub fn new(string: &'a str) -> CharIterator<'a> {
+impl<'a, T: CharCounter> CharIterator<'a, T> {
+    pub fn new(string: &'a str) -> CharIterator<'a, T> {
         CharIterator {
             bytes: string.as_bytes(),
             byte_offset: 0,
-            char_offset: 0,
+            counter: T::new(),
             last_byte_size: Cell::new(None),
         }
     }
@@ -36,13 +42,15 @@ impl<'a> CharIterator<'a> {
     }
 
     pub fn advance(&mut self) {
-        self.byte_offset += self.last_byte_size.get().unwrap();
-        self.char_offset += 1;
+        self.pop();
+
+        // self.byte_offset += self.last_byte_size.get().unwrap();
+        // self.char_offset += 1;
 
         self.last_byte_size.set(None);
     }
 
-    pub fn bytes_from_marker(&self, marker: CharIteratorMarker) -> &'a str {
+    pub fn bytes_from_marker(&self, marker: CharIteratorMarker<T>) -> &'a str {
         unsafe { std::str::from_utf8_unchecked(&self.bytes[marker.byte_offset..self.byte_offset]) }
     }
 
@@ -62,7 +70,8 @@ impl<'a> CharIterator<'a> {
         match self.next() {
             Some((ch, size)) => {
                 self.byte_offset += size;
-                self.char_offset += 1;
+                self.counter.consume(ch);
+
                 Some(ch)
             },
             None => None
@@ -78,7 +87,7 @@ impl<'a> CharIterator<'a> {
                 Some((ch, size)) => {
                     if predicate(ch) {
                         self.byte_offset += size;
-                        self.char_offset += 1;
+                        self.counter.consume(ch);
                     } else {
                         break;
                     }
@@ -122,22 +131,22 @@ impl<'a> CharIterator<'a> {
         }
     }
 
-    pub fn marker(&self) -> CharIteratorMarker {
+    pub fn marker(&self) -> CharIteratorMarker<T> {
         CharIteratorMarker {
             byte_offset: self.byte_offset,
-            char_offset: self.char_offset
+            counter: self.counter
         }
     }
 
-    pub fn restore(&mut self, marker: &CharIteratorMarker) {
+    pub fn restore(&mut self, marker: &CharIteratorMarker<T>) {
         self.byte_offset = marker.byte_offset;
-        self.char_offset = marker.char_offset;
+        self.counter = marker.counter;
     }
 }
 
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CharIteratorMarker {
+pub struct CharIteratorMarker<T: CharCounter> {
     pub byte_offset: usize,
-    pub char_offset: usize,
+    pub counter: T,
 }
