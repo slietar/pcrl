@@ -1,10 +1,14 @@
-use std::str::Chars;
+mod iterator;
+
+use iterator::CharIteratorMarker;
+
+use crate::iterator::CharIterator;
 
 
 fn main() -> Result<(), ()> {
     // let mut parser = Parser::new("[5, 6,foo, null]");
     // let result = parser.accept_expr(['\n', '\n']);
-    let mut parser = Parser::new("- 3 # Hello\n -4");
+    let mut parser = Parser::new("- 3 # Hello\n-4");
 
     parser.accept_line()?;
     parser.accept_line()?;
@@ -25,15 +29,11 @@ pub enum TokenKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Span(pub usize, pub usize);
+pub struct Span(pub CharIteratorMarker, pub CharIteratorMarker);
 
 impl Span {
-    pub fn len(&self) -> usize {
-        self.1 - self.0
-    }
-
-    fn point(point: usize) -> Self {
-        Self(point, point)
+    fn point(marker: &CharIteratorMarker) -> Self {
+        Self(*marker, *marker)
     }
 }
 
@@ -77,63 +77,35 @@ enum StackItem {
     String(String),
 }
 
-
 #[derive(Debug)]
 struct Parser<'a> {
-    chars: Chars<'a>,
-    contents: &'a str,
+    chars: CharIterator<'a>,
     errors: Vec<Error>,
     indent: Option<Indent>,
-    offset: usize,
     stack: Vec<StackItem>,
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(contents: &'a str) -> Parser<'a> {
+    fn new(contents: &'a str) -> Parser<'a> {
         Parser {
-            chars: contents.chars(),
-            contents,
+            chars: CharIterator::new(contents),
             errors: Vec::new(),
             indent: None,
-            offset: 0,
             stack: Vec::new(),
         }
     }
 
-    pub fn pop(&mut self) -> Option<char> {
-        match self.chars.next() {
-            Some(ch) => {
-                self.offset += 1;
-                Some(ch)
-            },
-            None => None
-        }
-    }
-
-    pub fn advance(&mut self, distance: usize) {
-        self.offset += distance;
-        self.chars.nth(distance - 1);
-    }
-
-    pub fn eat_while(&mut self, mut predicate: impl FnMut(char) -> bool) {
-        loop {
-            match self.peek() {
-                Some(ch) if !predicate(ch) => break,
-                None => break,
-                _ => ()
-            }
-
-            self.pop();
-        }
-    }
-
-    // pub fn is_eof(&self) -> bool {
-    //     self.chars.as_str().is_empty()
+    // fn save(&self) -> Point<'a> {
+    //     Point {
+    //         chars: self.chars.clone(),
+    //         offset: self.offset
+    //     }
     // }
 
-    pub fn peek(&self) -> Option<char> {
-        self.chars.clone().next()
-    }
+    // fn restore(&mut self, point: Point<'a>) {
+    //     self.chars = point.chars;
+    //     self.offset = point.offset;
+    // }
 }
 
 
@@ -161,10 +133,10 @@ pub enum Error {
 impl Parser<'_> {
     // Only returns None if the end of the file is reached
     fn accept_expr(&mut self, break_chars: [char; 2]) -> Result<Option<Object>, ()> {
-        self.eat_whitespace();
+        self.pop_whitespace();
 
-        let start_offset = self.offset;
-        let ch = match self.peek() {
+        let start_marker = self.chars.marker();
+        let ch = match self.chars.peek() {
             Some(ch) => ch,
             None => return Ok(None),
         };
@@ -173,26 +145,22 @@ impl Parser<'_> {
             _ if ch == break_chars[0] => return Ok(None),
             _ if ch == break_chars[1] => return Ok(None),
             '\n' => return Ok(None),
-            'n' if &self.contents[self.offset..(self.offset + 4)] == "null" => {
-                self.advance(4);
-
+            'n' if self.chars.pop_constant("null") => {
                 Value::Null
             },
             '[' => {
                 let mut items = Vec::new();
 
-                self.pop();
-                self.eat_whitespace();
+                self.chars.advance();
+                self.pop_whitespace();
 
                 if let Some(first_item) = self.accept_expr([',', ']'])? {
                     items.push(first_item);
 
                     loop {
-                        self.eat_whitespace();
+                        self.pop_whitespace();
 
-                        if let Some(',') = self.peek() {
-                            self.pop();
-                        } else {
+                        if !self.chars.pop_char(',') {
                             break;
                         }
 
@@ -204,55 +172,51 @@ impl Parser<'_> {
                     }
                 }
 
-                if self.peek() == Some(']') {
-                    self.pop();
-                } else {
-                    self.errors.push(Error::MissingListClose(Span::point(self.offset - 1)));
+                if !self.chars.pop_char(']') {
+                    self.errors.push(Error::MissingListClose(Span::point(&self.chars.marker())));
                     return Err(());
                 }
 
                 Value::List(items)
             },
             _ if ch.is_digit(10) => {
-                self.eat_while(|ch| ch.is_digit(10));
-                Value::Integer(self.contents[start_offset..self.offset].parse().unwrap())
+                let string = self.chars.pop_while(|ch| ch.is_digit(10));
+                Value::Integer(string.parse().unwrap())
             },
             _ => {
-                self.eat_while(|ch| ch != break_chars[0] && ch != break_chars[1]);
-                Value::String(self.contents[start_offset..self.offset].to_string())
+                let string = self.chars.pop_while(|ch| ch != break_chars[0] && ch != break_chars[1]);
+                Value::String(string.to_string())
             },
         };
 
-        let end_offset = self.offset;
-
         Ok(Some(Object {
-            span: Span(start_offset, end_offset),
+            span: Span(start_marker, self.chars.marker()),
             value,
         }))
     }
 
     fn accept_line(&mut self) -> Result<(), ()> {
-        let start_offset = self.offset;
+        let start_marker = self.chars.marker();
 
-        let indent = match self.peek() {
+        let indent = match self.chars.peek() {
             Some(' ') => {
-                self.eat_while(|ch| ch == ' ');
+                self.chars.pop_while(|ch| ch == ' ');
                 Some(Indent {
                     kind: IndentKind::Spaces,
-                    size: self.offset - start_offset,
+                    size: self.chars.char_offset - start_marker.char_offset,
                 })
             },
             Some('\t') => {
-                self.eat_while(|ch| ch == '\t');
+                self.chars.pop_while(|ch| ch == '\t');
                 Some(Indent {
                     kind: IndentKind::Tabs,
-                    size: self.offset - start_offset,
+                    size: self.chars.char_offset - start_marker.char_offset,
                 })
             },
             _ => None,
         };
 
-        match self.peek() {
+        match self.chars.peek() {
             Some('\n' | '#') | None => (),
             _ => {
                 // indent_level = max number of items in stack before processing
@@ -263,7 +227,7 @@ impl Parser<'_> {
                                 match first_indent.calc(&indent) {
                                     Some(level) => level,
                                     None => {
-                                        self.errors.push(Error::InvalidIndentSize(Span(start_offset, self.offset)));
+                                        self.errors.push(Error::InvalidIndentSize(Span(start_marker, self.chars.marker())));
                                         return Err(());
                                     },
                                 }
@@ -296,25 +260,29 @@ impl Parser<'_> {
 
                 // eprintln!("! {}", &self.contents[self.offset..]);
 
-                match self.peek() {
-                    Some('A'..='Z' | 'a'..='z' | '_') => {
-                        let key_start_offset = self.offset;
-                        self.eat_while(|ch| ch.is_alphanumeric() || ch == '_');
-                        let key = self.contents[key_start_offset..self.offset].to_string();
+                match self.chars.peek() {
+                    // Some('A'..='Z' | 'a'..='z' | '_') => {
+                    //     let key_start_offset = self.offset;
+                    //     let point = self.save();
 
-                        match self.peek() {
-                            Some(':') => {
-                                self.pop();
-                                self.eat_whitespace();
+                    //     self.eat_while(|ch| ch.is_alphanumeric() || ch == '_');
+                    //     let key = self.contents[key_start_offset..self.offset].to_string();
 
-                                let expr = self.accept_expr(['\x00', '\x00'])?;
-                            },
-                            _ => (),
-                        }
-                    },
+                    //     match self.peek() {
+                    //         Some(':') => {
+                    //             self.pop();
+                    //             self.pop_whitespace();
+
+                    //             let expr = self.accept_expr(['\x00', '\x00'])?;
+                    //         },
+                    //         _ => {
+                    //             self.restore(point);
+                    //         },
+                    //     }
+                    // },
                     Some('-') => {
-                        self.pop();
-                        self.eat_whitespace();
+                        self.chars.advance();
+                        self.pop_whitespace();
 
                         // match self.peek() {
                         //     Some('A'..='Z' | 'a'..='z' | '_') => {
@@ -334,7 +302,7 @@ impl Parser<'_> {
                                     list.push(expr);
                                 },
                                 _ => {
-                                    self.errors.push(Error::InvalidIndentSize(Span(self.offset, self.offset)));
+                                    self.errors.push(Error::InvalidIndentSize(Span::point(&self.chars.marker())));
                                     return Ok(());
                                 },
                             }
@@ -359,22 +327,21 @@ impl Parser<'_> {
 
         // match self.peek() { }
 
-        self.eat_whitespace();
+        self.pop_whitespace();
 
         let mut comment = None;
 
-        match self.peek() {
+        match self.chars.peek() {
             Some('\n') => {
-                self.pop();
+                self.chars.advance();
             },
             Some('#') => {
-                let comment_start_offset = self.offset;
+                let comment_start_marker = self.chars.marker();
 
-                self.eat_whitespace();
-                self.eat_while(|ch| ch != '\n');
-                comment = Some(self.contents[comment_start_offset..self.offset].to_string());
+                self.pop_whitespace();
+                comment = Some(self.chars.pop_while(|ch| ch != '\n'));
 
-                self.pop();
+                self.chars.pop();
             },
             None => {
 
@@ -397,7 +364,32 @@ impl Parser<'_> {
     //     }
     // }
 
-    fn eat_whitespace(&mut self) {
-        self.eat_while(|ch| ch == ' ' || ch == '\t');
+    fn accept_key(&mut self) -> Option<(String, Span)>{
+        match self.chars.peek() {
+            Some('A'..='Z' | 'a'..='z' | '_') => {
+                let key_start_marker = self.chars.marker();
+
+                let key = self.chars.pop_while(|ch| ch.is_alphanumeric() || ch == '_');
+                // let key = self.contents[key_start_offset..self.offset].to_string();
+
+                match self.chars.peek() {
+                    Some(':') => {
+                        let key_end_marker = self.chars.marker();
+                        self.chars.advance();
+
+                        Some((key.to_string(), Span(key_start_marker, key_end_marker)))
+                    },
+                    _ => {
+                        self.chars.restore(&key_start_marker);
+                        None
+                    },
+                }
+            },
+            _ => None,
+        }
+    }
+
+    fn pop_whitespace(&mut self) {
+        self.chars.pop_while(|ch| ch == ' ' || ch == '\t');
     }
 }
