@@ -15,8 +15,8 @@ fn main() -> Result<(), ()> {
 -
     - z
     -
-        - w
-    -x
+        - w # foo
+    - { a: b }
     - [5, 6]
 ");
 
@@ -119,6 +119,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
 pub enum Value<T: CharCounter> {
     Integer(i64),
     List(Vec<Object<T>>),
+    Map(Vec<(WithSpan<String, T>, Object<T>)>),
     Null,
     String(String),
 }
@@ -145,6 +146,21 @@ impl<T: CharCounter> Value<T> {
 
                 output.write("]".as_bytes())?;
             },
+            Map(items) => {
+                output.write("{".as_bytes())?;
+
+                for (index, (WithSpan { value: key, .. }, Object { value, .. })) in items.iter().enumerate() {
+                    if index > 0 {
+                        output.write(", ".as_bytes())?;
+                    }
+
+                    Value::String::<T>(key.clone()).json(output)?;
+                    output.write(":".as_bytes())?;
+                    value.json(output)?;
+                }
+
+                output.write("}".as_bytes())?;
+            },
             Null => {
                 output.write("null".as_bytes())?;
             },
@@ -165,10 +181,19 @@ pub struct Object<T: CharCounter> {
 }
 
 #[derive(Debug)]
+pub struct WithSpan<T, S: CharCounter> {
+    pub span: Span<S>,
+    pub value: T,
+}
+
+#[derive(Debug)]
 pub enum Error<T: CharCounter> {
     InvalidIndent(Span<T>),
     InvalidIndentSize(Span<T>),
     MissingListClose(Span<T>),
+    MissingMapClose(Span<T>),
+    MissingMapSemicolon(Span<T>),
+    MissingMapValue(Span<T>),
 }
 
 #[derive(Debug)]
@@ -196,10 +221,10 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                 Value::Null
             },
             '[' => {
-                let mut items = Vec::new();
-
                 self.chars.advance();
                 self.pop_whitespace();
+
+                let mut items = Vec::new();
 
                 if let Some(first_item) = self.accept_expr([',', ']'])? {
                     items.push(first_item);
@@ -226,12 +251,56 @@ impl<'a, T: CharCounter> Parser<'a, T> {
 
                 Value::List(items)
             },
+            '{' => {
+                self.chars.advance();
+                self.pop_whitespace();
+
+                let mut items = Vec::new();
+
+                loop {
+                    let key_start_marker = self.chars.marker();
+                    let key = self.chars.pop_while(|ch| ch != ':' && ch != '}');
+
+                    if key.is_empty() {
+                        break;
+                    }
+
+                    let key_span = Span(key_start_marker, self.chars.marker());
+
+                    self.pop_whitespace();
+
+                    if !self.chars.pop_char(':') {
+                        self.errors.push(Error::MissingMapSemicolon(Span::point(&self.chars.marker())));
+                        return Err(());
+                    }
+
+                    self.pop_whitespace();
+
+                    if let Some(value) = self.accept_expr([',', '}'])? {
+                        items.push((WithSpan { span: key_span, value: key.to_string() }, value));
+                    } else {
+                        self.errors.push(Error::MissingMapValue(Span::point(&self.chars.marker())));
+                        return Err(());
+                    }
+
+                    if !self.chars.pop_char(',') {
+                        break;
+                    }
+                }
+
+                if !self.chars.pop_char('}') {
+                    self.errors.push(Error::MissingMapClose(Span::point(&self.chars.marker())));
+                    return Err(());
+                }
+
+                Value::Map(items)
+            },
             _ if ch.is_digit(10) => {
                 let string = self.chars.pop_while(|ch| ch.is_digit(10));
                 Value::Integer(string.parse().unwrap())
             },
             _ => {
-                let string = self.chars.pop_while(|ch| ch != break_chars[0] && ch != break_chars[1] && ch != '\n');
+                let string = self.chars.pop_while(|ch| ch != break_chars[0] && ch != break_chars[1] && ch != '\n' && ch != '#');
                 Value::String(string.to_string())
             },
         };
