@@ -41,8 +41,8 @@ enum StackItem<T: CharCounter> {
         start_marker: Option<CharIteratorMarker<T>>, // None -> the list was pre-allocated
     },
     Map {
-        entries: Vec<(String, Object<T>)>,
-        key: Option<String>,
+        entries: Vec<(WithSpan<String, T>, Object<T>)>,
+        key: Option<WithSpan<String, T>>,
     },
     String(String),
 }
@@ -141,7 +141,7 @@ impl<T: CharCounter> Value<T> {
                 output.write("]".as_bytes())?;
             },
             Map(items) => {
-                output.write("{".as_bytes())?;
+                output.write("{ ".as_bytes())?;
 
                 for (index, (WithSpan { value: key, .. }, Object { value, .. })) in items.iter().enumerate() {
                     if index > 0 {
@@ -149,11 +149,11 @@ impl<T: CharCounter> Value<T> {
                     }
 
                     Value::String::<T>(key.clone()).format_json(output)?;
-                    output.write(":".as_bytes())?;
+                    output.write(": ".as_bytes())?;
                     value.format_json(output)?;
                 }
 
-                output.write("}".as_bytes())?;
+                output.write(" }".as_bytes())?;
             },
             Null => {
                 output.write("null".as_bytes())?;
@@ -340,12 +340,22 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                         value: Value::List(items),
                     }
                 },
+                StackItem::Map { entries, key: None, } => {
+                    Object {
+                        span: Span(self.chars.marker(), self.chars.marker()), // TODO: fix
+                        value: Value::Map(entries),
+                    }
+                },
                 _ => todo!(),
             };
 
             match self.stack.last_mut() {
                 Some(StackItem::List { items, .. }) => {
                     items.push(object);
+                },
+                Some(StackItem::Map { entries, key: ref mut key @ Some(_) }) => {
+                    let key = std::mem::replace(key, None).unwrap();
+                    entries.push((key, object));
                 },
                 None => return Some(object),
                 _ => todo!(),
@@ -548,24 +558,48 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                                 }
                             }
                         },
-                        Some(_) => todo!(),
-                        None => todo!(),
+                        _ => (),
+                        // Some(_) => todo!(),
+                        // None => todo!(),
+                    }
+
+                    if let Some(key) = self.accept_key() {
+                        if let Some(expr) = self.accept_expr(['\x00', '\x00'])? {
+                            match (self.stack.last_mut(), level_diff) {
+                                // [root]
+                                // a: b
+                                (None, 1) => {
+                                    self.stack.push(StackItem::Map {
+                                        entries: vec![(key, expr)],
+                                        key: None,
+                                    });
+                                },
+
+                                // a: b
+                                // c:
+                                (Some(StackItem::Map { entries, key: None }), 0) => {
+                                    entries.push((key, expr));
+                                },
+
+                                // a:
+                                //   a: c
+                                (Some(StackItem::Map { key: Some(_), .. }), 1) => {
+                                    self.stack.push(StackItem::Map {
+                                        entries: vec![(key, expr)],
+                                        key: None,
+                                    });
+                                },
+
+                                _ => todo!(),
+                            }
+                        }
+
+                        // eprintln!("Key: {:?}", key);
                     }
 
                     // eprintln!("Stack: {:#?}", self.stack);
                 },
             }
-
-            // match self.stack.last_mut().unwrap() {
-            //     StackItem::List(items) => {
-            //         if let Some(expr) = self.accept_expr([',', '\n'])? {
-            //             items.push(expr);
-            //         }
-            //     },
-            //     _ => todo!()
-            // }
-
-            // match self.peek() { }
 
             self.pop_whitespace();
 
@@ -610,7 +644,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
     //     }
     // }
 
-    fn accept_key(&mut self) -> Option<(String, Span<T>)>{
+    fn accept_key(&mut self) -> Option<WithSpan<String, T>>{
         match self.chars.peek() {
             Some('A'..='Z' | 'a'..='z' | '_') => {
                 let key_start_marker = self.chars.marker();
@@ -623,7 +657,10 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                         let key_end_marker = self.chars.marker();
                         self.chars.advance();
 
-                        Some((key.to_string(), Span(key_start_marker, key_end_marker)))
+                        Some(WithSpan {
+                            span: Span(key_start_marker, key_end_marker),
+                            value: key.to_string(),
+                        })
                     },
                     _ => {
                         self.chars.restore(&key_start_marker);
