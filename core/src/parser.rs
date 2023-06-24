@@ -22,36 +22,47 @@ impl<T: CharCounter> Span<T> {
         }
 
         let span_start_marker = iterator.marker();
-        let mut line_byte_markers = Vec::new();
-
-        // let span_start_line_end_marker;
-        // let line_end_byte_offset;
+        let mut line_markers = Vec::new();
+        let mut span_end_marker = span_start_marker;
+        let mut extend_last_line = false;
 
         while iterator.byte_offset < self.1.byte_offset {
             match iterator.peek().unwrap() {
                 '\n' => {
-                    line_byte_markers.push((current_line_start_marker, iterator.marker()));
+                    let current_marker = iterator.marker();
+                    line_markers.push((current_line_start_marker, current_marker));
 
                     iterator.advance();
+
+                    if iterator.byte_offset == self.1.byte_offset {
+                        extend_last_line = true;
+                        span_end_marker = current_marker;
+                    }
+
                     current_line_start_marker = iterator.marker();
                 },
                 _ => {
                     iterator.advance();
+
+                    if iterator.byte_offset == self.1.byte_offset {
+                        extend_last_line = false;
+                        span_end_marker = iterator.marker();
+                    }
                 },
             }
         }
 
-        let span_end_marker = iterator.marker();
-
-        loop {
-            match iterator.peek() {
-                Some('\n') | None => {
-                    line_byte_markers.push((current_line_start_marker, iterator.marker()));
-                    break;
-                },
-                Some(_) => {
-                    iterator.advance();
-                },
+        if !extend_last_line || line_markers.is_empty() {
+            loop {
+                match iterator.peek() {
+                    Some('\n') | None => {
+                        line_markers.push((current_line_start_marker, iterator.marker()));
+                        break;
+                    },
+                    Some(_) => {
+                        iterator.advance();
+                    },
+                }
             }
         }
 
@@ -60,8 +71,8 @@ impl<T: CharCounter> Span<T> {
         // Using .len() is ok because digits are all ASCII.
         let line_number_width = last_line_number_fmt.len();
 
-        if line_byte_markers.len() == 1 {
-            let (line_start_marker, line_end_marker) = line_byte_markers[0];
+        if line_markers.len() == 1 {
+            let (line_start_marker, line_end_marker) = line_markers[0];
 
             output.write_fmt(format_args!("{} | ", last_line_number_fmt))?;
 
@@ -72,14 +83,22 @@ impl<T: CharCounter> Span<T> {
             output.write(" | ".as_bytes())?;
 
             output.write(&[' ' as u8].repeat(span_start_marker.counter.column))?;
-            output.write(&['^' as u8].repeat(span_end_marker.counter.column - span_start_marker.counter.column))?;
+
+            let span_width = span_end_marker.counter.column - span_start_marker.counter.column;
+
+            if span_width > 0 {
+                output.write(&['^' as u8].repeat(span_end_marker.counter.column - span_start_marker.counter.column))?;
+
+                if extend_last_line {
+                    output.write(&['-' as u8])?;
+                }
+            } else {
+                output.write(&['~' as u8])?;
+            }
 
             output.write(&['\n' as u8])?;
         } else {
-            // for line_number in span_start_marker.counter.line..=span_end_marker.counter.line {
-            // eprintln!("{:#?}", line_byte_markers);
-
-            for (relative_line_number, (line_start_marker, line_end_marker)) in line_byte_markers.iter().enumerate() {
+            for (relative_line_number, (line_start_marker, line_end_marker)) in line_markers.iter().enumerate() {
                 let line_number = span_start_marker.counter.line + relative_line_number;
 
                 output.write_fmt(format_args!("{: >width$} | ", line_number + 1, width = line_number_width))?;
@@ -93,10 +112,16 @@ impl<T: CharCounter> Span<T> {
                 if relative_line_number == 0 {
                     output.write(&[' ' as u8].repeat(span_start_marker.counter.column))?;
                     output.write(&['^' as u8].repeat(line_end_marker.counter.column - span_start_marker.counter.column))?;
-                } else if relative_line_number == line_byte_markers.len() - 1 {
+                    output.write(&['-' as u8])?;
+                } else if relative_line_number == line_markers.len() - 1 {
                     output.write(&['^' as u8].repeat(span_end_marker.counter.column))?;
+
+                    if extend_last_line {
+                        output.write(&['-' as u8])?;
+                    }
                 } else {
                     output.write(&['^' as u8].repeat(line_end_marker.counter.column))?;
+                    output.write(&['-' as u8])?;
                 }
 
                 output.write(&['\n' as u8])?;
