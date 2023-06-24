@@ -9,7 +9,7 @@ pub trait CharCounter: Clone + Copy + std::fmt::Debug {
 
 #[derive(Debug)]
 pub struct CharIterator<'a, T: CharCounter> {
-    bytes: &'a [u8],
+    pub bytes: &'a [u8],
     pub byte_offset: usize,
     counter: T,
     last_byte_size: Cell<Option<usize>>,
