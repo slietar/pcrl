@@ -178,3 +178,25 @@ pub struct CharIteratorMarker<T: CharCounter> {
     pub byte_offset: usize,
     pub counter: T,
 }
+
+// impl<T: CharCounter> CharIteratorMarker<T> {
+//     fn convert<S: CharCounter>(&self, contents: &str) -> CharIteratorMarker<S> {
+//         let mut marker = CharIteratorMarker {
+//             byte_offset: 0,
+//             counter: S::new(),
+//         };
+
+//         while marker.byte_offset < self.byte_offset {
+//             let ch = contents[marker.byte_offset].chars().next().unwrap();
+//             marker.counter.consume(ch);
+//         }
+
+//         marker
+//     }
+// }
+
+// impl<Src: CharCounter, Dest: CharCounter> std::convert::From<CharIteratorMarker<Src>> for CharIteratorMarker<Dest> {
+//     fn from(value: CharIteratorMarker<Src>) -> Self {
+//         Self { byte_offset: value.byte_offset, counter: Dest::new() }
+//     }
+// }

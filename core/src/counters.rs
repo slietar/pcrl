@@ -19,7 +19,7 @@ impl CharCounter for Empty {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Character {
-    position: usize,
+    pub position: usize,
 }
 
 impl Character {
@@ -38,8 +38,8 @@ impl CharCounter for Character {
 
 #[derive(Clone, Copy, Debug)]
 pub struct CharacterLineColumn {
-    column: usize,
-    line: usize,
+    pub column: usize,
+    pub line: usize,
 }
 
 impl CharCounter for CharacterLineColumn {
@@ -63,7 +63,7 @@ impl CharCounter for CharacterLineColumn {
 
 #[derive(Clone, Copy, Debug)]
 pub struct UTF16 {
-    position: usize,
+    pub position: usize,
 }
 
 impl CharCounter for UTF16 {
@@ -82,8 +82,8 @@ impl CharCounter for UTF16 {
 #[derive(Clone, Copy, Debug)]
 pub struct LspUtf16 {
     carriage_return: bool,
-    column: usize,
-    line: usize,
+    pub column: usize,
+    pub line: usize,
 }
 
 impl CharCounter for LspUtf16 {

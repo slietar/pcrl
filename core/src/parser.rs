@@ -1,3 +1,5 @@
+use std::iter;
+
 use crate::iterator::{CharIterator, CharIteratorMarker, CharCounter};
 
 
@@ -7,6 +9,101 @@ pub struct Span<T: CharCounter>(pub CharIteratorMarker<T>, pub CharIteratorMarke
 impl<T: CharCounter> Span<T> {
     fn point(marker: &CharIteratorMarker<T>) -> Self {
         Self(*marker, *marker)
+    }
+
+    pub fn format(&self, contents: &str, output: &mut dyn std::io::Write) -> std::io::Result<()> {
+        let mut iterator: CharIterator<'_, crate::counters::CharacterLineColumn> = CharIterator::new(contents);
+        let mut current_line_start_marker = iterator.marker();
+
+        while iterator.byte_offset < self.0.byte_offset {
+            if iterator.pop().unwrap() == '\n' {
+                current_line_start_marker = iterator.marker();
+            }
+        }
+
+        let span_start_marker = iterator.marker();
+        let mut line_byte_markers = Vec::new();
+
+        // let span_start_line_end_marker;
+        // let line_end_byte_offset;
+
+        while iterator.byte_offset < self.1.byte_offset {
+            match iterator.peek().unwrap() {
+                '\n' => {
+                    line_byte_markers.push((current_line_start_marker, iterator.marker()));
+
+                    iterator.advance();
+                    current_line_start_marker = iterator.marker();
+                },
+                _ => {
+                    iterator.advance();
+                },
+            }
+        }
+
+        let span_end_marker = iterator.marker();
+
+        loop {
+            match iterator.peek() {
+                Some('\n') | None => {
+                    line_byte_markers.push((current_line_start_marker, iterator.marker()));
+                    break;
+                },
+                Some(_) => {
+                    iterator.advance();
+                },
+            }
+        }
+
+        let last_line_number_fmt = format!("{}", span_end_marker.counter.line + 1);
+
+        // Using .len() is ok because digits are all ASCII.
+        let line_number_width = last_line_number_fmt.len();
+
+        if line_byte_markers.len() == 1 {
+            let (line_start_marker, line_end_marker) = line_byte_markers[0];
+
+            output.write_fmt(format_args!("{} | ", last_line_number_fmt))?;
+
+            output.write(&contents[line_start_marker.byte_offset..line_end_marker.byte_offset].as_bytes())?;
+            output.write(&['\n' as u8])?;
+
+            output.write(&[' ' as u8].repeat(line_number_width))?;
+            output.write(" | ".as_bytes())?;
+
+            output.write(&[' ' as u8].repeat(span_start_marker.counter.column))?;
+            output.write(&['^' as u8].repeat(span_end_marker.counter.column - span_start_marker.counter.column))?;
+
+            output.write(&['\n' as u8])?;
+        } else {
+            // for line_number in span_start_marker.counter.line..=span_end_marker.counter.line {
+            // eprintln!("{:#?}", line_byte_markers);
+
+            for (relative_line_number, (line_start_marker, line_end_marker)) in line_byte_markers.iter().enumerate() {
+                let line_number = span_start_marker.counter.line + relative_line_number;
+
+                output.write_fmt(format_args!("{: >width$} | ", line_number + 1, width = line_number_width))?;
+
+                output.write(&contents[line_start_marker.byte_offset..line_end_marker.byte_offset].as_bytes())?;
+                output.write(&['\n' as u8])?;
+
+                output.write(&[' ' as u8].repeat(line_number_width))?;
+                output.write(" | ".as_bytes())?;
+
+                if relative_line_number == 0 {
+                    output.write(&[' ' as u8].repeat(span_start_marker.counter.column))?;
+                    output.write(&['^' as u8].repeat(line_end_marker.counter.column - span_start_marker.counter.column))?;
+                } else if relative_line_number == line_byte_markers.len() - 1 {
+                    output.write(&['^' as u8].repeat(span_end_marker.counter.column))?;
+                } else {
+                    output.write(&['^' as u8].repeat(line_end_marker.counter.column))?;
+                }
+
+                output.write(&['\n' as u8])?;
+            }
+        }
+
+        Ok(())
     }
 }
 

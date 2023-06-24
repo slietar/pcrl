@@ -4,4 +4,5 @@ mod parser;
 mod tests;
 
 
-pub use parser::{Value, parse};
+pub use iterator::{CharCounter, CharIterator, CharIteratorMarker};
+pub use parser::{Span, Value, parse};
