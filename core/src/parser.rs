@@ -308,15 +308,39 @@ type Error<T> = WithSpan<ErrorKind, T>;
 
 #[derive(Debug)]
 pub enum ErrorKind {
+    // -
+    // - a
     EmptyExpandedList,
+
+    // x: [3, 4] a
     ExtraneousChars,
+
+    // [...]
     InvalidIndent,
+
+    // x: 3
+    //   y: 4
+    //  z: 5
     InvalidIndentSize,
+
+    // x: [3, 4
     MissingListClose,
+
+    // x: { a: 3
     MissingMapClose,
+
+    // x: { a
     MissingMapSemicolon,
+
+    // x:
+    // y:
     MissingMapValue,
+
+    // x: 3.4.5
     InvalidScalarLiteral,
+
+    // $
+    InvalidValue,
 }
 
 #[derive(Debug)]
@@ -329,8 +353,15 @@ pub struct Comment<T: CharCounter> {
 enum LineItem<T: CharCounter> {
     ListOpen,
     ListItem(Object<T>),
-    MapKey(WithSpan<String, T>),
-    MapEntry(WithSpan<String, T>, Object<T>),
+    MapKey {
+        key: WithSpan<String, T>,
+        list: bool,
+    },
+    MapEntry {
+        key: WithSpan<String, T>,
+        list: bool,
+        value: Object<T>,
+    }
 }
 
 
@@ -590,15 +621,20 @@ impl<'a, T: CharCounter> Parser<'a, T> {
 
                     let line_item = if let Some(key) = self.accept_key() {
                         // [-] x: y
-                        if let Some(expr) = self.accept_expr(['\x00', '\x00'])? {
-                            LineItem::MapEntry(key, expr)
+                        if let Some(value) = self.accept_expr(['\x00', '\x00'])? {
+                            LineItem::MapEntry {
+                                key,
+                                list: is_list_item,
+                                value,
+                            }
                         // [-] x:
                         } else {
-                            LineItem::MapKey(key)
+                            LineItem::MapKey {
+                                key,
+                                list: is_list_item,
+                            }
                         }
-                    } else {
-                        // TODO: Check list item
-
+                    } else if is_list_item {
                         // - x
                         if let Some(expr) = self.accept_expr(['\x00', '\x00'])? {
                             LineItem::ListItem(expr)
@@ -607,6 +643,9 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                             assert!(is_list_item);
                             LineItem::ListOpen
                         }
+                    } else {
+                        self.errors.push(Error::new(ErrorKind::InvalidValue, Span::point(&item_start_marker)));
+                        return Err(());
                     };
 
                     self.pop_whitespace();
@@ -619,6 +658,8 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                     }
 
                     match (line_item, self.stack.last_mut(), level_diff) {
+                        // [root]
+                        // -
                         (LineItem::ListOpen, None, 1) => {
                             self.stack.push(StackItem::List {
                                 items: Vec::new(),
@@ -630,39 +671,147 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                                 start_marker: None,
                             });
                         },
+
+                        // - a
+                        // -
                         (LineItem::ListOpen, Some(StackItem::List { .. }), 0) => {
                             self.stack.push(StackItem::List {
                                 items: Vec::new(),
                                 start_marker: None,
                             });
                         },
-                        (LineItem::ListItem(item), None, 1) => {
+
+                        // a:
+                        //   - x
+                        //
+                        // [root]
+                        // - x
+                        (LineItem::ListItem(item), Some(StackItem::Map { floating_key: Some(_), .. }) | None, 1) => {
                             self.stack.push(StackItem::List {
                                 items: vec![item],
                                 start_marker: Some(item_start_marker),
                             });
                         },
+
+                        // -
+                        //   - x
+                        //
+                        // - a
+                        // - b
                         (LineItem::ListItem(item), Some(StackItem::List { items, ref mut start_marker }), 0) => {
-                            if start_marker.is_none() {
-                                *start_marker = Some(item_start_marker);
-                            }
+                            // debug_assert!(start_marker.is_none());
+                            *start_marker = Some(item_start_marker);
 
                             items.push(item);
                         },
-                        (LineItem::MapEntry(key, value), Some(StackItem::Map { floating_key: Some(..), .. }) | None, 1) => {
+
+                        // a:
+                        //   x: y
+                        //
+                        // [root]
+                        // x: y
+                        //
+                        // a:
+                        //   - x: y
+                        //
+                        // [root]
+                        // - x: y
+                        (LineItem::MapEntry { key, list, value }, Some(StackItem::Map { floating_key: Some(_), .. }) | None, 1) => {
+                            if list {
+                                self.stack.push(StackItem::List {
+                                    items: Vec::new(),
+                                    start_marker: Some(item_start_marker),
+                                });
+                            }
+
                             self.stack.push(StackItem::Map {
                                 entries: vec![(key, value)],
                                 floating_key: None,
                             });
                         },
-                        (LineItem::MapEntry(key, value), Some(StackItem::Map { entries, floating_key, .. }), 0) => {
+
+                        // - a
+                        // - x: y
+                        (LineItem::MapEntry { key, list: true, value }, Some(StackItem::List { items, .. }), 0) => {
+                            self.stack.push(StackItem::Map {
+                                entries: vec![(key, value)],
+                                floating_key: None,
+                            });
+                        },
+
+                        // (LineItem::ListItem(item), Some(StackItem::Map { floating_key: Some(_), .. }) | None, 1) => {
+
+                        // },
+
+                        // // [root]
+                        // // - x:
+                        // (LineItem::MapKey { key, list: true }, None, 1) => {
+                        //     self.stack.push(StackItem::List {
+                        //         items: Vec::new(),
+                        //         start_marker: Some(item_start_marker),
+                        //     });
+
+                        //     self.stack.push(StackItem::Map {
+                        //         entries: Vec::new(),
+                        //         floating_key: Some(key),
+                        //     });
+                        // },
+
+                        // a: b
+                        // x: y
+                        (LineItem::MapEntry { key, list: false, value }, Some(StackItem::Map { entries, floating_key, .. }), 0) => {
                             debug_assert!(floating_key.is_none());
                             entries.push((key, value));
                         },
-                        (LineItem::MapKey(key), Some(StackItem::Map { ref mut floating_key, .. }), 0) => {
+
+                        // a: b
+                        // x:
+                        (LineItem::MapKey { key, list: false }, Some(StackItem::Map { ref mut floating_key, .. }), 0) => {
                             debug_assert!(floating_key.is_none());
                             *floating_key = Some(key);
                         },
+
+                        // // a:
+                        // //   - x:
+                        // (LineItem::MapKey { key, list: true }, Some(StackItem::Map { floating_key: Some(_), .. }), 1) => {
+                        //     if true {
+                        //         self.stack.push(StackItem::List {
+                        //             items: Vec::new(),
+                        //             start_marker: Some(item_start_marker),
+                        //         });
+                        //     }
+
+                        //     self.stack.push(StackItem::Map {
+                        //         entries: Vec::new(),
+                        //         floating_key: Some(key),
+                        //     })
+                        // },
+
+                        // a:
+                        //   - x:
+                        //
+                        // a:
+                        //   x:
+                        //
+                        // [root]
+                        // x:
+                        //
+                        // [root]
+                        // - x:
+                        (LineItem::MapKey { key, list }, Some(StackItem::Map { floating_key: Some(_), .. }) | None, 1) => {
+                            if list {
+                                self.stack.push(StackItem::List {
+                                    items: Vec::new(),
+                                    start_marker: Some(item_start_marker),
+                                });
+                            }
+
+                            self.stack.push(StackItem::Map {
+                                entries: Vec::new(),
+                                floating_key: Some(key),
+                            });
+                        },
+
                         (line_item, _, _) => {
                             eprintln!("Missing: {:#?} {:#?} {:#?}", &line_item, self.stack.last(), level_diff);
                             todo!()
@@ -724,8 +873,6 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                 let key = self.chars.pop_while(|ch| ch.is_alphanumeric() || ch == '_');
                 // let key = self.contents[key_start_offset..self.offset].to_string();
 
-                // TODO: Check that key is not empty
-
                 match self.chars.peek() {
                     Some(':') => {
                         let key_end_marker = self.chars.marker();
@@ -742,6 +889,8 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                     },
                 }
             },
+            // For completion
+            // Some(':') => {},
             _ => None,
         }
     }
