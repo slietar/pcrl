@@ -81,6 +81,8 @@ impl<'a, T: CharCounter> Parser<'a, T> {
 
 #[derive(Debug)]
 pub enum Value<T: CharCounter> {
+    Bool(bool),
+    Float(f64),
     Integer(i64),
     List(Vec<Object<T>>),
     Map(Vec<(WithSpan<String, T>, Object<T>)>),
@@ -92,17 +94,38 @@ pub enum Value<T: CharCounter> {
 impl<T: CharCounter> Value<T> {
     pub fn json(&self) -> std::io::Result<String> {
         let mut buffer = Vec::new();
-        self.to_json(&mut buffer)?;
+        self.format_json(&mut buffer)?;
         Ok(std::str::from_utf8(&buffer).unwrap().to_owned())
     }
 
-    fn to_json(&self, output: &mut dyn std::io::Write) -> std::io::Result<()> {
+    fn format_json(&self, output: &mut dyn std::io::Write) -> std::io::Result<()> {
         use Value::*;
 
         match self {
+            Bool(value) => {
+                if *value {
+                    output.write("true".as_bytes())?;
+                } else {
+                    output.write("false".as_bytes())?;
+                }
+            },
             Integer(value) => {
                 let mut buffer = itoa::Buffer::new();
                 output.write(buffer.format(*value).as_bytes())?;
+            },
+            Float(value) => {
+                if *value == f64::INFINITY {
+                    output.write("Infinity".as_bytes())?;
+                } else if *value == f64::NEG_INFINITY {
+                    output.write("-Infinity".as_bytes())?;
+                } else if *value == f64::NAN {
+                    output.write("NaN".as_bytes())?;
+                } else {
+                    // let mut buffer = ryu::Buffer::new();
+                    // output.write(buffer.format(*value).as_bytes())?;
+
+                    output.write_fmt(format_args!("{}", value))?;
+                }
             },
             List(items) => {
                 output.write("[".as_bytes())?;
@@ -112,7 +135,7 @@ impl<T: CharCounter> Value<T> {
                         output.write(", ".as_bytes())?;
                     }
 
-                    item.value.to_json(output)?;
+                    item.value.format_json(output)?;
                 }
 
                 output.write("]".as_bytes())?;
@@ -125,9 +148,9 @@ impl<T: CharCounter> Value<T> {
                         output.write(", ".as_bytes())?;
                     }
 
-                    Value::String::<T>(key.clone()).to_json(output)?;
+                    Value::String::<T>(key.clone()).format_json(output)?;
                     output.write(":".as_bytes())?;
-                    value.to_json(output)?;
+                    value.format_json(output)?;
                 }
 
                 output.write("}".as_bytes())?;
@@ -138,7 +161,6 @@ impl<T: CharCounter> Value<T> {
             String(value) => {
                 output.write_fmt(format_args!("\"{}\"", value.replace("\"", "\\\"")))?;
             },
-            _ => todo!(),
         }
 
         Ok(())
@@ -161,6 +183,7 @@ pub enum Error<T: CharCounter> {
     MissingMapClose(Span<T>),
     MissingMapSemicolon(Span<T>),
     MissingMapValue(Span<T>),
+    InvalidScalarLiteral(Span<T>),
 }
 
 #[derive(Debug)]
@@ -184,9 +207,6 @@ impl<'a, T: CharCounter> Parser<'a, T> {
             _ if ch == break_chars[0] => return Ok(None),
             _ if ch == break_chars[1] => return Ok(None),
             '\n' => return Ok(None),
-            'n' if self.chars.pop_constant("null") => {
-                Value::Null
-            },
             '[' => {
                 self.chars.advance();
                 self.pop_whitespace();
@@ -262,12 +282,43 @@ impl<'a, T: CharCounter> Parser<'a, T> {
 
                 Value::Map(items)
             },
-            _ if ch.is_digit(10) => {
-                let string = self.chars.pop_while(|ch| ch.is_digit(10));
-                Value::Integer(string.parse().unwrap())
+            '+' if self.chars.pop_constant("+inf") => {
+                Value::Float(f64::INFINITY)
+            },
+            '-' if self.chars.pop_constant("-inf") => {
+                Value::Float(f64::NEG_INFINITY)
+            },
+            '+' | '-' | '0'..='9' | '.' | 'e' | 'E' | '_' => {
+                let string = self.chars.pop_until(|ch| ch != break_chars[0] && ch != break_chars[1] && ch != '\n' && ch != '#', |ch| ch == ' ');
+
+                if let Ok(value) = string.parse::<i64>() {
+                    Value::Integer(value)
+                } else {
+                    if let Ok(value) = string.parse::<f64>() {
+                        Value::Float(value)
+                    } else {
+                        self.errors.push(Error::InvalidScalarLiteral(Span::point(&self.chars.marker())));
+                        return Err(());
+                    }
+                }
+            },
+            'n' if self.chars.pop_constant("null") => {
+                Value::Null
+            },
+            't' if self.chars.pop_constant("true") => {
+                Value::Bool(true)
+            },
+            'f' if self.chars.pop_constant("false") => {
+                Value::Bool(false)
+            },
+            'i' if self.chars.pop_constant("inf") => {
+                Value::Float(f64::INFINITY)
+            },
+            'n' if self.chars.pop_constant("nan") => {
+                Value::Float(f64::NAN)
             },
             _ => {
-                let string = self.chars.pop_while(|ch| ch != break_chars[0] && ch != break_chars[1] && ch != '\n' && ch != '#');
+                let string = self.chars.pop_until(|ch| ch != break_chars[0] && ch != break_chars[1] && ch != '\n' && ch != '#', |ch| ch == ' ');
                 Value::String(string.to_string())
             },
         };
@@ -501,7 +552,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                         None => todo!(),
                     }
 
-                    eprintln!("Stack: {:#?}", self.stack);
+                    // eprintln!("Stack: {:#?}", self.stack);
                 },
             }
 

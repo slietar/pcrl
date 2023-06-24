@@ -79,7 +79,6 @@ impl<'a, T: CharCounter> CharIterator<'a, T> {
     }
 
     pub fn pop_while(&mut self, predicate: impl Fn(char) -> bool) -> &'a str {
-        // let result = String::new();
         let start_byte_offset = self.byte_offset;
 
         loop {
@@ -94,9 +93,38 @@ impl<'a, T: CharCounter> CharIterator<'a, T> {
                 },
                 None => {
                     break;
-                }
+                },
             }
         }
+
+        unsafe { std::str::from_utf8_unchecked(&self.bytes[start_byte_offset..self.byte_offset]) }
+    }
+
+    pub fn pop_until(&mut self, predicate_while: impl Fn(char) -> bool, predicate_until: impl Fn(char) -> bool) -> &'a str {
+        let start_byte_offset = self.byte_offset;
+        let mut end_marker = self.marker();
+
+        loop {
+            match self.next() {
+                Some((ch, size)) => {
+                    if !predicate_while(ch) {
+                        break;
+                    }
+
+                    self.byte_offset += size;
+                    self.counter.consume(ch);
+
+                    if !predicate_until(ch) {
+                        end_marker = self.marker();
+                    }
+                },
+                None => {
+                    break;
+                },
+            }
+        }
+
+        self.restore(&end_marker);
 
         unsafe { std::str::from_utf8_unchecked(&self.bytes[start_byte_offset..self.byte_offset]) }
     }
