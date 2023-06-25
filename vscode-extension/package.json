@@ -1,0 +1,25 @@
+{
+  "name": "pcrl-lsp-client",
+  "version": "0.0.0",
+  "main": "./lib/index.js",
+  "engines": {
+    "vscode": "^1.52.0"
+  },
+  "scripts": {
+    "build": "npm run build:js && npm run build:server",
+    "build:js": "tsc",
+    "build:server": "mkdir -p lsp-server && cp ../lsp-server/target/debug/lsp-server lib/lsp-server-debug"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.3.1",
+    "@types/vscode": "^1.75.1",
+    "typescript": "^5.0.0"
+  },
+
+  "activationEvents": [
+		"onLanguage:plaintext"
+	]
+}

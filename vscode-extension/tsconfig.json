@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "esModuleInterop": true,
+
+    "forceConsistentCasingInFileNames": true,
+    "declaration": true,
+
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "skipLibCheck": true,
+    "strict": true,
+
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": "lib"
+  },
+  "files": [
+    "src/index.ts"
+  ]
+}
