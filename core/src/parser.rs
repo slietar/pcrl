@@ -303,9 +303,9 @@ impl<T, S: CharCounter> WithSpan<T, S> {
     }
 }
 
-type Object<T> = WithSpan<Value<T>, T>;
+pub type Object<T> = WithSpan<Value<T>, T>;
 
-type Error<T> = WithSpan<ErrorKind, T>;
+pub type Error<T> = WithSpan<ErrorKind, T>;
 
 #[derive(Debug)]
 pub enum ErrorKind {
