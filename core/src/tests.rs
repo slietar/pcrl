@@ -10,6 +10,8 @@ fn entries() {
         ("- a\n-  b\n-c", r#"["a", "b", "c"]"#),
         ("-\n  - a\n", r#"[["a"]]"#),
         ("a: b", r#"{ "a": "b" }"#),
+        ("- a : 3", r#"[{ "a": 3 }]"#),
+        ("- a: 3\n- b", r#"[{ "a": 3 }, "b"]"#),
 
         ("- 3", r#"[3]"#),
         ("- 3.5", r#"[3.5]"#),
@@ -28,6 +30,15 @@ fn entries() {
 
     for (input, expected) in &entries {
         let result = parse::<counters::Empty>(input);
+
+        if !result.errors.is_empty() {
+            for error in &result.errors {
+                eprintln!("Error: {:#?}", error.value);
+                error.span.format(input, &mut std::io::stdout()).unwrap();
+            }
+
+            eprintln!("---");
+        }
 
         assert!(result.errors.is_empty());
         assert_eq!(&result.json().unwrap(), expected);
