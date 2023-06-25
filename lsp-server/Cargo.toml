@@ -1,0 +1,9 @@
+[package]
+name = "lsp-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pcrl = { path = "../core" }
+tokio = { version = "1.28.2", features = ["full"] }
+tower-lsp = "0.19.0"
