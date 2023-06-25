@@ -339,9 +339,6 @@ pub enum ErrorKind {
 
     // x: 3.4.5
     InvalidScalarLiteral,
-
-    // $
-    InvalidValue,
 }
 
 #[derive(Debug)]
@@ -519,7 +516,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                         None => {
                             // The list can only be empty if there is a floating handle.
                             self.errors.push(Error::new(ErrorKind::EmptyExpandedList, Span(start_marker, floating_handle_end_marker.unwrap())));
-                            return None;
+                            continue;
                         },
                     }
                 },
@@ -553,6 +550,8 @@ impl<'a, T: CharCounter> Parser<'a, T> {
 
     pub fn parse(&mut self) -> Result<Object<T>, ()> {
         loop {
+            // eprintln!("{:?}", std::str::from_utf8(&self.chars.bytes[self.chars.byte_offset..]).unwrap());
+
             let line_start_marker = self.chars.marker();
 
             let indent = match self.chars.peek() {
@@ -572,15 +571,20 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                         size: spaces.len(),
                     })
                 },
-                _ => None,
+                Some(_) => None,
+                None => {
+                    break;
+                },
             };
 
             match self.chars.peek() {
-                // Empty line
-                Some('\n' | '#') | None => (),
+                // Whitespace-only line
+                Some('\n' | '#') | None => {
+                    let _comment = self.accept_line_end();
+                },
 
-                // Non-empty line
-                _ => {
+                // Non-whitespace line
+                Some(_) => {
                     // indent_level = max number of items in stack before processing
                     let indent_level = match indent {
                         Some(indent) => {
@@ -590,7 +594,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                                         Some(level) => level,
                                         None => {
                                             self.errors.push(Error::new(ErrorKind::InvalidIndentSize, Span(line_start_marker, self.chars.marker())));
-                                            return Err(());
+                                            continue;
                                         },
                                     }
                                 },
@@ -608,6 +612,8 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                     let current_level = self.stack.len();
                     let level_diff = indent_level - current_level;
 
+                    // eprintln!("{} {} {}", indent_level, current_level, std::str::from_utf8(&self.chars.bytes[self.chars.byte_offset..]).unwrap());
+
                     let item_start_marker = self.chars.marker();
                     let handle_end_marker = match self.chars.peek() {
                         Some('-') => {
@@ -622,44 +628,60 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                     };
 
                     let line_item = if let Some(key) = self.accept_key() {
-                        // [-] x: y
-                        if let Some(value) = self.accept_expr(['\x00', '\x00'])? {
-                            LineItem::MapEntry {
-                                list: handle_end_marker.is_some(),
-                                key,
-                                value,
-                            }
-                        // [-] x:
-                        } else {
-                            LineItem::MapKey {
-                                list: handle_end_marker.is_some(),
-                                key,
-                            }
+                        match self.accept_expr(['\x00', '\x00']) {
+                            // [-] x: y
+                            Ok(Some(value)) => {
+                                Some(LineItem::MapEntry {
+                                    list: handle_end_marker.is_some(),
+                                    key,
+                                    value,
+                                })
+                            },
+
+                            // [-] x:
+                            Ok(None) => {
+                                Some(LineItem::MapKey {
+                                    list: handle_end_marker.is_some(),
+                                    key,
+                                })
+                            },
+
+                            Err(_) => {
+                                None
+                            },
                         }
                     } else if handle_end_marker.is_some() {
-                        // - x
-                        if let Some(expr) = self.accept_expr(['\x00', '\x00'])? {
-                            LineItem::ListItem(expr)
-                        // -
-                        } else {
-                            LineItem::ListOpen
+                        match self.accept_expr(['\x00', '\x00']) {
+                            // - x
+                            Ok(Some(item)) => {
+                                Some(LineItem::ListItem(item))
+                            },
+
+                            // -
+                            Ok(None) => {
+                                Some(LineItem::ListOpen)
+                            },
+
+                            Err(_) => {
+                                None
+                            },
                         }
                     } else {
-                        self.errors.push(Error::new(ErrorKind::InvalidValue, Span::point(&item_start_marker)));
-                        return Err(());
+                        None
                     };
 
                     let item_end_marker = self.chars.marker();
 
                     self.pop_whitespace();
 
-                    let extraneous_chars_start_marker = self.chars.marker();
-                    let extraneous_chars = self.chars.pop_while(|ch| ch != '\n' && ch != '#');
+                    let comment = self.accept_line_end();
 
-                    if !extraneous_chars.is_empty() {
-                        self.errors.push(Error::new(ErrorKind::ExtraneousChars, Span(extraneous_chars_start_marker, self.chars.marker())));
-                        continue;
-                    }
+                    let line_item = match line_item {
+                        Some(line_item) => line_item,
+                        None => {
+                            continue;
+                        }
+                    };
 
                     match (line_item, self.stack.last_mut(), level_diff) {
                         // [root]
@@ -743,7 +765,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
 
                         // - a
                         // - x: y
-                        (LineItem::MapEntry { key, list: true, value }, Some(StackItem::List { items, .. }), 0) => {
+                        (LineItem::MapEntry { key, list: true, value }, Some(StackItem::List { .. }), 0) => {
                             self.stack.push(StackItem::Map {
                                 entries: vec![(key, value)],
                                 floating_key: None,
@@ -795,36 +817,6 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                             self.errors.push(Error::new(ErrorKind::InvalidIndent, Span(item_start_marker, item_end_marker)));
                         },
                     }
-                }
-            }
-
-
-            self.pop_whitespace();
-
-            let mut comment = None;
-
-            match self.chars.peek() {
-                Some('\n') => {
-                    self.chars.advance();
-                },
-                Some('#') => {
-                    let comment_start_marker = self.chars.marker();
-
-                    self.pop_whitespace();
-                    let value = self.chars.pop_while(|ch| ch != '\n').to_string();
-
-                    comment = Some(Comment {
-                        span: Span(comment_start_marker, self.chars.marker()),
-                        value,
-                    });
-
-                    self.chars.pop();
-                },
-                None => {
-                    break;
-                },
-                _ => {
-                    return Err(());
                 },
             }
 
@@ -835,13 +827,43 @@ impl<'a, T: CharCounter> Parser<'a, T> {
         self.reduce_stack(0).ok_or(())
     }
 
-    // fn accept_value(&mut self) -> Result<Object, ()> {
-    //     if let Some(expr) = self.accept_expr(['\x00', '\x00'])? {
-    //         Ok(expr)
-    //     } else {
-    //         Err(())
-    //     }
-    // }
+    fn accept_line_end(&mut self) -> Option<Comment<T>> {
+        self.pop_whitespace();
+
+        match self.chars.peek() {
+            Some('\n') => {
+                self.chars.advance();
+                None
+            },
+            Some('#') => {
+                let comment_start_marker = self.chars.marker();
+
+                self.pop_whitespace();
+                let value = self.chars.pop_while(|ch| ch != '\n').to_string();
+
+                let comment_end_marker = self.chars.marker();
+
+                self.chars.pop();
+
+                Some(Comment {
+                    span: Span(comment_start_marker, comment_end_marker),
+                    value,
+                })
+            },
+            Some(_) => {
+                let extraneous_chars_start_marker = self.chars.marker();
+                let extraneous_chars = self.chars.pop_until(|ch| ch != '\n' && ch != '#', |ch| ch == ' ');
+
+                if !extraneous_chars.is_empty() {
+                    self.errors.push(Error::new(ErrorKind::ExtraneousChars, Span(extraneous_chars_start_marker, self.chars.marker())));
+                }
+
+                self.pop_whitespace();
+                self.accept_line_end()
+            },
+            None => None,
+        }
+    }
 
     fn accept_key(&mut self) -> Option<WithSpan<String, T>>{
         match self.chars.peek() {
