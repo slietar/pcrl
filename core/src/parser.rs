@@ -365,7 +365,7 @@ enum LineItem<T: CharCounter> {
 
 impl<'a, T: CharCounter> Parser<'a, T> {
     // Only returns None if the first character is \n, #, or EOF.
-    fn accept_expr(&mut self, break_chars: [char; 2]) -> Result<Option<Object<T>>, ()> {
+    fn accept_expr(&mut self, break_chars: &[char]) -> Result<Option<Object<T>>, ()> {
         self.pop_whitespace();
 
         let start_marker = self.chars.marker();
@@ -375,8 +375,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
         };
 
         let value = match ch {
-            _ if ch == break_chars[0] => return Ok(None),
-            _ if ch == break_chars[1] => return Ok(None),
+            _ if break_chars.contains(&ch) => return Ok(None),
             '\n' => return Ok(None),
             '[' => {
                 self.chars.advance();
@@ -384,7 +383,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
 
                 let mut items = Vec::new();
 
-                if let Some(first_item) = self.accept_expr([',', ']'])? {
+                if let Some(first_item) = self.accept_expr(&[',', ']'])? {
                     items.push(first_item);
 
                     loop {
@@ -394,7 +393,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                             break;
                         }
 
-                        if let Some(next_item) = self.accept_expr([',', ']'])? {
+                        if let Some(next_item) = self.accept_expr(&[',', ']'])? {
                             items.push(next_item);
                         } else {
                             break;
@@ -434,7 +433,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
 
                     self.pop_whitespace();
 
-                    if let Some(value) = self.accept_expr([',', '}'])? {
+                    if let Some(value) = self.accept_expr(&[',', '}'])? {
                         items.push((WithSpan { span: key_span, value: key.to_string() }, value));
                     } else {
                         self.errors.push(Error::new(ErrorKind::MissingMapValue, Span::point(&self.chars.marker())));
@@ -460,7 +459,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                 Value::Float(f64::NEG_INFINITY)
             },
             '+' | '-' | '0'..='9' | '.' => {
-                let string = self.chars.pop_until(|ch| ch != break_chars[0] && ch != break_chars[1] && ch != '\n' && ch != '#', |ch| ch == ' ');
+                let string = self.chars.pop_until(|ch| !break_chars.contains(&ch) && ch != '\n' && ch != '#', |ch| ch == ' ');
 
                 if let Ok(value) = string.parse::<i64>() {
                     Value::Integer(value)
@@ -489,7 +488,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                 Value::Float(f64::NAN)
             },
             _ => {
-                let string = self.chars.pop_until(|ch| ch != break_chars[0] && ch != break_chars[1] && ch != '\n' && ch != '#', |ch| ch == ' ');
+                let string = self.chars.pop_until(|ch| !break_chars.contains(&ch) && ch != '\n' && ch != '#', |ch| ch == ' ');
                 Value::String(string.to_string())
             },
         };
@@ -628,7 +627,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                     };
 
                     let line_item = if let Some(key) = self.accept_key() {
-                        match self.accept_expr(['\x00', '\x00']) {
+                        match self.accept_expr(&[]) {
                             // [-] x: y
                             Ok(Some(value)) => {
                                 Some(LineItem::MapEntry {
@@ -651,7 +650,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                             },
                         }
                     } else if handle_end_marker.is_some() {
-                        match self.accept_expr(['\x00', '\x00']) {
+                        match self.accept_expr(&[]) {
                             // - x
                             Ok(Some(item)) => {
                                 Some(LineItem::ListItem(item))

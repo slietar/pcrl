@@ -26,14 +26,46 @@ impl<'a, T: CharCounter> CharIterator<'a, T> {
     }
 
     fn next(&self) -> Option<(char, usize)> {
-        if self.byte_offset < self.bytes.len() {
-            let byte = self.bytes[self.byte_offset];
+        const fn utf8_first_byte(byte: u8, width: u32) -> u32 {
+            (byte & (0x7F >> width)) as u32
+        }
 
-            if byte < 128 {
-                Some((byte as char, 1))
-            } else {
-                todo!()
+        const CONT_MASK: u8 = 0b0011_1111;
+
+        const fn utf8_acc_cont_byte(ch: u32, byte: u8) -> u32 {
+            (ch << 6) | (byte & CONT_MASK) as u32
+        }
+
+        if self.byte_offset < self.bytes.len() {
+            // Taken from std::str::validations::next_code_point
+            // https://github.com/rust-lang/rust/blob/master/library/core/src/str/validations.rs#L36
+
+            // Assumes that the input is valid UTF-8
+
+            let x = self.bytes[self.byte_offset];
+            if x < 128 {
+                return Some((x as char, 1));
             }
+
+            let init = utf8_first_byte(x, 2);
+            let y = self.bytes[self.byte_offset + 1];
+            let mut ch = utf8_acc_cont_byte(init, y);
+            let mut size = 2;
+
+            if x >= 0xE0 {
+                let z = self.bytes[self.byte_offset + 2];
+                let y_z = utf8_acc_cont_byte((y & CONT_MASK) as u32, z);
+                ch = init << 12 | y_z;
+                size += 1;
+
+                if x >= 0xF0 {
+                    let w = self.bytes[self.byte_offset + 3];
+                    ch = (init & 7) << 18 | utf8_acc_cont_byte(y_z, w);
+                    size += 1;
+                }
+            }
+
+            Some((unsafe { char::from_u32_unchecked(ch) }, size))
         } else {
             None
         }
