@@ -9,7 +9,10 @@ impl<T: CharCounter> Span<T> {
         Self(*marker, *marker)
     }
 
+    #[cfg(feature = "format")]
     pub fn format(&self, contents: &str, output: &mut dyn std::io::Write) -> std::io::Result<()> {
+        use unicode_segmentation::UnicodeSegmentation;
+
         let mut iterator: CharIterator<'_, crate::counters::CharacterLineColumn> = CharIterator::new(contents);
         let mut current_line_start_marker = iterator.marker();
 
@@ -80,12 +83,14 @@ impl<T: CharCounter> Span<T> {
             output.write(&[' ' as u8].repeat(line_number_width))?;
             output.write(" | ".as_bytes())?;
 
-            output.write(&[' ' as u8].repeat(span_start_marker.counter.column))?;
+            let whitespace_width = UnicodeSegmentation::graphemes(&contents[line_start_marker.byte_offset..span_start_marker.byte_offset], true).count();
+            output.write(&[' ' as u8].repeat(whitespace_width))?;
 
             let span_width = span_end_marker.counter.column - span_start_marker.counter.column;
 
             if span_width > 0 {
-                output.write(&['^' as u8].repeat(span_end_marker.counter.column - span_start_marker.counter.column))?;
+                let highlight_width = UnicodeSegmentation::graphemes(&contents[span_start_marker.byte_offset..span_end_marker.byte_offset], true).count();
+                output.write(&['^' as u8].repeat(highlight_width))?;
 
                 if extend_last_line {
                     output.write(&['-' as u8])?;
