@@ -1,8 +1,8 @@
-pub mod counters;
+pub mod indexers;
 mod iterator;
 mod parser;
 mod tests;
 
 
-pub use iterator::{CharCounter, CharIterator, CharIteratorMarker};
+pub use iterator::{CharIndexer, CharIterator, Marker};
 pub use parser::{Error, Object, Span, Value, parse};

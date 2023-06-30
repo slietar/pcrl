@@ -1,11 +1,11 @@
-use crate::iterator::{CharIterator, CharIteratorMarker, CharCounter};
+use crate::iterator::{CharIterator, CharIndexer, CharIndex, Marker};
 
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Span<T: CharCounter>(pub CharIteratorMarker<T>, pub CharIteratorMarker<T>);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Span<Index: CharIndex>(pub Marker<Index>, pub Marker<Index>);
 
-impl<T: CharCounter> Span<T> {
-    fn point(marker: &CharIteratorMarker<T>) -> Self {
+impl<Index: CharIndex> Span<Index> {
+    fn point(marker: &Marker<Index>) -> Self {
         Self(*marker, *marker)
     }
 
@@ -13,7 +13,7 @@ impl<T: CharCounter> Span<T> {
     pub fn format(&self, contents: &str, output: &mut dyn std::io::Write) -> std::io::Result<()> {
         use unicode_segmentation::UnicodeSegmentation;
 
-        let mut iterator: CharIterator<'_, crate::counters::CharacterLineColumn> = CharIterator::new(contents);
+        let mut iterator: CharIterator<'_, crate::indexers::CharacterLineColumn> = CharIterator::new(contents);
         let mut current_line_start_marker = iterator.marker();
 
         while iterator.byte_offset < self.0.byte_offset {
@@ -67,7 +67,7 @@ impl<T: CharCounter> Span<T> {
             }
         }
 
-        let last_line_number_fmt = format!("{}", span_end_marker.counter.line + 1);
+        let last_line_number_fmt = format!("{}", span_end_marker.index.line + 1);
 
         // Using .len() is ok because digits are all ASCII.
         let line_number_width = last_line_number_fmt.len();
@@ -86,7 +86,7 @@ impl<T: CharCounter> Span<T> {
             let whitespace_width = UnicodeSegmentation::graphemes(&contents[line_start_marker.byte_offset..span_start_marker.byte_offset], true).count();
             output.write(&[' ' as u8].repeat(whitespace_width))?;
 
-            let span_width = span_end_marker.counter.column - span_start_marker.counter.column;
+            let span_width = span_end_marker.index.column - span_start_marker.index.column;
 
             if span_width > 0 {
                 let highlight_width = UnicodeSegmentation::graphemes(&contents[span_start_marker.byte_offset..span_end_marker.byte_offset], true).count();
@@ -102,7 +102,7 @@ impl<T: CharCounter> Span<T> {
             output.write(&['\n' as u8])?;
         } else {
             for (relative_line_number, (line_start_marker, line_end_marker)) in line_markers.iter().enumerate() {
-                let line_number = span_start_marker.counter.line + relative_line_number;
+                let line_number = span_start_marker.index.line + relative_line_number;
 
                 output.write_fmt(format_args!("{: >width$} | ", line_number + 1, width = line_number_width))?;
 
@@ -113,17 +113,17 @@ impl<T: CharCounter> Span<T> {
                 output.write(" | ".as_bytes())?;
 
                 if relative_line_number == 0 {
-                    output.write(&[' ' as u8].repeat(span_start_marker.counter.column))?;
-                    output.write(&['^' as u8].repeat(line_end_marker.counter.column - span_start_marker.counter.column))?;
+                    output.write(&[' ' as u8].repeat(span_start_marker.index.column))?;
+                    output.write(&['^' as u8].repeat(line_end_marker.index.column - span_start_marker.index.column))?;
                     output.write(&['-' as u8])?;
                 } else if relative_line_number == line_markers.len() - 1 {
-                    output.write(&['^' as u8].repeat(span_end_marker.counter.column))?;
+                    output.write(&['^' as u8].repeat(span_end_marker.index.column))?;
 
                     if extend_last_line {
                         output.write(&['-' as u8])?;
                     }
                 } else {
-                    output.write(&['^' as u8].repeat(line_end_marker.counter.column))?;
+                    output.write(&['^' as u8].repeat(line_end_marker.index.column))?;
                     output.write(&['-' as u8])?;
                 }
 
@@ -160,28 +160,28 @@ enum IndentKind {
 
 
 #[derive(Debug)]
-enum StackItem<T: CharCounter> {
+enum StackItem<Index: CharIndex> {
     List {
-        floating_handle_end_marker: Option<CharIteratorMarker<T>>,
-        items: Vec<Object<T>>,
-        start_marker: CharIteratorMarker<T>,
+        floating_handle_end_marker: Option<Marker<Index>>,
+        items: Vec<Object<Index>>,
+        start_marker: Marker<Index>,
     },
     Map {
-        entries: Vec<(WithSpan<String, T>, Object<T>)>,
-        floating_key: Option<WithSpan<String, T>>,
+        entries: Vec<(WithSpan<String, Index>, Object<Index>)>,
+        floating_key: Option<WithSpan<String, Index>>,
     },
     // String(String),
 }
 
 #[derive(Debug)]
-pub struct Parser<'a, T: CharCounter> {
-    chars: CharIterator<'a, T>,
-    pub errors: Vec<Error<T>>,
+pub struct Parser<'a, Indexer: CharIndexer> {
+    chars: CharIterator<'a, Indexer>,
+    pub errors: Vec<Error<Indexer::Index>>,
     indent: Option<Indent>,
-    stack: Vec<StackItem<T>>,
+    stack: Vec<StackItem<Indexer::Index>>,
 }
 
-impl<'a, T: CharCounter> Parser<'a, T> {
+impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
     pub fn new(contents: &'a str) -> Self {
         Self {
             chars: CharIterator::new(contents),
@@ -206,18 +206,18 @@ impl<'a, T: CharCounter> Parser<'a, T> {
 
 
 #[derive(Debug)]
-pub enum Value<T: CharCounter> {
+pub enum Value<Index: CharIndex> {
     Bool(bool),
     Float(f64),
     Integer(i64),
-    List(Vec<Object<T>>),
-    Map(Vec<(WithSpan<String, T>, Object<T>)>),
+    List(Vec<Object<Index>>),
+    Map(Vec<(WithSpan<String, Index>, Object<Index>)>),
     Null,
     String(String),
 }
 
 #[cfg(test)]
-impl<T: CharCounter> Value<T> {
+impl<Index: CharIndex> Value<Index> {
     pub fn json(&self) -> std::io::Result<String> {
         let mut buffer = Vec::new();
         self.format_json(&mut buffer)?;
@@ -274,7 +274,7 @@ impl<T: CharCounter> Value<T> {
                         output.write(", ".as_bytes())?;
                     }
 
-                    Value::String::<T>(key.clone()).format_json(output)?;
+                    Value::String::<Index>(key.clone()).format_json(output)?;
                     output.write(": ".as_bytes())?;
                     value.format_json(output)?;
                 }
@@ -294,13 +294,13 @@ impl<T: CharCounter> Value<T> {
 }
 
 #[derive(Debug)]
-pub struct WithSpan<T, S: CharCounter> {
-    pub span: Span<S>,
+pub struct WithSpan<T, Index: CharIndex> {
+    pub span: Span<Index>,
     pub value: T,
 }
 
-impl<T, S: CharCounter> WithSpan<T, S> {
-    fn new(value: T, span: Span<S>) -> Self {
+impl<T, Index: CharIndex> WithSpan<T, Index> {
+    fn new(value: T, span: Span<Index>) -> Self {
         Self {
             span,
             value,
@@ -308,9 +308,9 @@ impl<T, S: CharCounter> WithSpan<T, S> {
     }
 }
 
-pub type Object<T> = WithSpan<Value<T>, T>;
+pub type Object<Index> = WithSpan<Value<Index>, Index>;
 
-pub type Error<T> = WithSpan<ErrorKind, T>;
+pub type Error<Index> = WithSpan<ErrorKind, Index>;
 
 #[derive(Debug)]
 pub enum ErrorKind {
@@ -347,30 +347,30 @@ pub enum ErrorKind {
 }
 
 #[derive(Debug)]
-pub struct Comment<T: CharCounter> {
-    span: Span<T>,
+pub struct Comment<Index: CharIndex> {
+    span: Span<Index>,
     value: String,
 }
 
 #[derive(Debug)]
-enum LineItem<T: CharCounter> {
+enum LineItem<Index: CharIndex> {
     ListOpen,
-    ListItem(Object<T>),
+    ListItem(Object<Index>),
     MapKey {
-        key: WithSpan<String, T>,
+        key: WithSpan<String, Index>,
         list: bool,
     },
     MapEntry {
-        key: WithSpan<String, T>,
+        key: WithSpan<String, Index>,
         list: bool,
-        value: Object<T>,
+        value: Object<Index>,
     }
 }
 
 
-impl<'a, T: CharCounter> Parser<'a, T> {
+impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
     // Only returns None if the first character is \n, #, or EOF.
-    fn accept_expr(&mut self, break_chars: &[char]) -> Result<Option<Object<T>>, ()> {
+    fn accept_expr(&mut self, break_chars: &[char]) -> Result<Option<Object<Indexer::Index>>, ()> {
         self.pop_whitespace();
 
         let start_marker = self.chars.marker();
@@ -504,7 +504,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
         }))
     }
 
-    fn reduce_stack(&mut self, level: usize) -> Option<Object<T>> {
+    fn reduce_stack(&mut self, level: usize) -> Option<Object<Indexer::Index>> {
         while self.stack.len() > level {
             let item = self.stack.pop().unwrap();
 
@@ -552,7 +552,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
         None
     }
 
-    pub fn parse(&mut self) -> Result<Object<T>, ()> {
+    pub fn parse(&mut self) -> Result<Object<Indexer::Index>, ()> {
         loop {
             // eprintln!("{:?}", std::str::from_utf8(&self.chars.bytes[self.chars.byte_offset..]).unwrap());
 
@@ -831,7 +831,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
         self.reduce_stack(0).ok_or(())
     }
 
-    fn accept_line_end(&mut self) -> Option<Comment<T>> {
+    fn accept_line_end(&mut self) -> Option<Comment<Indexer::Index>> {
         self.pop_whitespace();
 
         match self.chars.peek() {
@@ -869,9 +869,10 @@ impl<'a, T: CharCounter> Parser<'a, T> {
         }
     }
 
-    fn accept_key(&mut self) -> Option<WithSpan<String, T>>{
+    fn accept_key(&mut self) -> Option<WithSpan<String, Indexer::Index>>{
         match self.chars.peek() {
             Some('A'..='Z' | 'a'..='z' | '_') => {
+                let key_start_offset = self.chars.byte_offset;
                 let key_start_marker = self.chars.marker();
 
                 let key = self.chars.pop_while(|ch| ch.is_alphanumeric() || ch == '_');
@@ -890,7 +891,7 @@ impl<'a, T: CharCounter> Parser<'a, T> {
                         })
                     },
                     _ => {
-                        self.chars.restore(&key_start_marker);
+                        self.chars.byte_offset = key_start_offset;
                         None
                     },
                 }
@@ -908,20 +909,20 @@ impl<'a, T: CharCounter> Parser<'a, T> {
 
 
 #[derive(Debug)]
-pub struct ParseResult<T: CharCounter> {
-    pub errors: Vec<Error<T>>,
-    pub object: Option<Object<T>>,
+pub struct ParseResult<Index: CharIndex> {
+    pub errors: Vec<Error<Index>>,
+    pub object: Option<Object<Index>>,
 }
 
 #[cfg(test)]
-impl<T: CharCounter> ParseResult<T> {
+impl<Index: CharIndex> ParseResult<Index> {
     pub fn json(&self) -> Option<String> {
         self.object.as_ref().and_then(|obj| obj.value.json().ok())
     }
 }
 
-pub fn parse<T: CharCounter>(input: &str) -> ParseResult<T> {
-    let mut parser = Parser::new(input);
+pub fn parse<Indexer: CharIndexer>(input: &str) -> ParseResult<Indexer::Index> {
+    let mut parser = Parser::<'_, Indexer>::new(input);
     let object = parser.parse();
 
     ParseResult {

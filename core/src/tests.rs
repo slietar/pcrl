@@ -1,7 +1,5 @@
 #![cfg(test)]
 
-use super::{counters, parse};
-
 
 #[test]
 fn entries() {
@@ -29,7 +27,7 @@ fn entries() {
     ];
 
     for (input, expected) in &entries {
-        let result = parse::<counters::Empty>(input);
+        let result = super::parse::<super::indexers::Empty>(input);
 
         if !result.errors.is_empty() {
             for error in &result.errors {

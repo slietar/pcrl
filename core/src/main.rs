@@ -1,6 +1,4 @@
-use pcrl::CharCounter;
-
-
+#[cfg(feature = "format")]
 fn main() -> Result<(), ()> {
 //     let input = "foo
 // bar
@@ -22,14 +20,16 @@ fn main() -> Result<(), ()> {
     let input = "
 a: b
 c:
-    d: e
+    é
+    e\u{0301}
+    x: [e\u{0301}] e\u{0301} 🇫🇷🤶🏻 # foo
     f: g
     # d: e
 ";
 
-    let result = pcrl::parse::<pcrl::counters::Character>(input);
+    let result = pcrl::parse::<pcrl::indexers::Character>(input);
 
-    eprintln!("Result: {:#?}", result.object);
+    // eprintln!("Result: {:#?}", result.object);
     // eprintln!("Errors: {:#?}", result.errors);
 
     for error in result.errors {
@@ -44,4 +44,10 @@ c:
     // }
 
     Ok(())
+}
+
+
+#[cfg(not(feature = "format"))]
+fn main() {
+
 }
