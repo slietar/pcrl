@@ -25,11 +25,14 @@ x:
       - p
 
 u: v
+s:
+  -  p: v
+     l: l
 ";
 
     let result = pcrl::parse::<pcrl::indexers::Character>(input);
 
-    // eprintln!("Result: {:#?}", result.object);
+    eprintln!("Result: {:#?}", result.object);
     // eprintln!("Errors: {:#?}", result.errors);
 
     for error in result.errors {

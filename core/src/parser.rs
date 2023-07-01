@@ -137,30 +137,7 @@ impl<Index: CharIndex> Span<Index> {
 
 
 #[derive(Debug)]
-struct Indent {
-    kind: IndentKind,
-    size: usize,
-}
-
-impl Indent {
-    fn calc(&self, other: &Indent) -> Option<usize> {
-        if self.kind == other.kind && other.size % self.size == 0 {
-            Some(other.size / self.size)
-        } else {
-            None
-        }
-    }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum IndentKind {
-    Spaces,
-    Tabs,
-}
-
-
-#[derive(Debug)]
-enum StackItem<Index: CharIndex> {
+enum StackItemKind<Index: CharIndex> {
     List {
         floating_handle_end_marker: Option<Marker<Index>>,
         items: Vec<Object<Index>>,
@@ -174,10 +151,16 @@ enum StackItem<Index: CharIndex> {
 }
 
 #[derive(Debug)]
+struct StackItem<Index: CharIndex> {
+    comments: Vec<Comment<Index>>,
+    kind: StackItemKind<Index>,
+    indent: usize,
+}
+
+#[derive(Debug)]
 pub struct Parser<'a, Indexer: CharIndexer> {
     chars: CharIterator<'a, Indexer>,
     pub errors: Vec<Error<Indexer::Index>>,
-    indent: Option<Indent>,
     stack: Vec<StackItem<Indexer::Index>>,
 }
 
@@ -186,7 +169,6 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
         Self {
             chars: CharIterator::new(contents),
             errors: Vec::new(),
-            indent: None,
             stack: Vec::new(),
         }
     }
@@ -348,23 +330,34 @@ pub enum ErrorKind {
     InvalidScalarLiteral,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Comment<Index: CharIndex> {
     span: Span<Index>,
     value: String,
 }
 
 #[derive(Debug)]
-enum LineItem<Index: CharIndex> {
-    ListOpen,
-    ListItem(Object<Index>),
+struct ListHandle<Index: CharIndex> {
+    end_marker: Marker<Index>,
+    item_indent: usize,
+}
+
+#[derive(Debug)]
+enum Node<Index: CharIndex> {
+    ListOpen {
+        handle: ListHandle<Index>,
+    },
+    ListItem {
+        handle: ListHandle<Index>,
+        object: Object<Index>,
+    },
     MapKey {
+        handle: Option<ListHandle<Index>>,
         key: WithSpan<String, Index>,
-        list: bool,
     },
     MapEntry {
+        handle: Option<ListHandle<Index>>,
         key: WithSpan<String, Index>,
-        list: bool,
         value: Object<Index>,
     }
 }
@@ -510,8 +503,8 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
         while self.stack.len() > level {
             let item = self.stack.pop().unwrap();
 
-            let object = match item {
-                StackItem::List { floating_handle_end_marker, items, start_marker, .. } => {
+            let object = match item.kind {
+                StackItemKind::List { floating_handle_end_marker, items, start_marker, .. } => {
                     match items.last() {
                         Some(item) => {
                             Object {
@@ -526,7 +519,7 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                         },
                     }
                 },
-                StackItem::Map { entries, floating_key: None } => {
+                StackItemKind::Map { entries, floating_key: None } => {
                     Object {
                         span: Span(
                             entries.first().unwrap().0.span.0,
@@ -535,7 +528,7 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                         value: Value::Map(entries),
                     }
                 },
-                StackItem::Map { entries, floating_key: Some(floating_key) } => {
+                StackItemKind::Map { entries, floating_key: Some(floating_key) } => {
                     self.errors.push(Error::new(ErrorKind::MissingExpandedMapValue, floating_key.span));
 
                     Object {
@@ -548,11 +541,11 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                 },
             };
 
-            match self.stack.last_mut() {
-                Some(StackItem::List { items, .. }) => {
+            match self.stack.last_mut().and_then(|item| Some(&mut item.kind)) {
+                Some(StackItemKind::List { items, .. }) => {
                     items.push(object);
                 },
-                Some(StackItem::Map { entries, floating_key: ref mut key @ Some(_) }) => {
+                Some(StackItemKind::Map { entries, floating_key: ref mut key @ Some(_) }) => {
                     let key = std::mem::replace(key, None).unwrap();
                     entries.push((key, object));
                 },
@@ -565,278 +558,309 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
     }
 
     pub fn parse(&mut self) -> Result<Object<Indexer::Index>, ()> {
+        let mut preceding_lines = Vec::new();
+
         loop {
             // eprintln!("{:?}", std::str::from_utf8(&self.chars.bytes[self.chars.byte_offset..]).unwrap());
 
             let line_start_marker = self.chars.marker();
 
-            let indent = match self.chars.peek() {
-                Some(' ') => {
-                    let spaces = self.chars.pop_while(|ch| ch == ' ');
+            if self.chars.peek().is_none() {
+                break;
+            }
 
-                    Some(Indent {
-                        kind: IndentKind::Spaces,
-                        size: spaces.len(),
-                    })
-                },
-                Some('\t') => {
-                    let spaces = self.chars.pop_while(|ch| ch == '\t');
-
-                    Some(Indent {
-                        kind: IndentKind::Tabs,
-                        size: spaces.len(),
-                    })
-                },
-                Some(_) => None,
-                None => {
-                    break;
-                },
-            };
+            let indent = self.chars.pop_while(|ch| ch == ' ').len();
 
             match self.chars.peek() {
                 // Whitespace-only line
                 Some('\n' | '#') | None => {
-                    let _comment = self.accept_line_end();
+                    let comment = self.accept_line_end();
+                    preceding_lines.push((indent, comment));
+
+                    continue;
                 },
+                _ => (),
+            }
 
-                // Non-whitespace line
+            let content_start_marker = self.chars.marker();
+
+            let nested = match self.stack.last() {
+                Some(last_item) if indent > last_item.indent => {
+                    true
+                },
                 Some(_) => {
-                    // indent_level = max number of items in stack before processing
-                    let indent_level = match indent {
-                        Some(indent) => {
-                            match &self.indent {
-                                Some(first_indent) => {
-                                    match first_indent.calc(&indent) {
-                                        Some(level) => level,
-                                        None => {
-                                            self.errors.push(Error::new(ErrorKind::InvalidIndentSize, Span(line_start_marker, self.chars.marker())));
+                    let current_item = self.stack.iter().enumerate().find(|(index, item)| item.indent == indent);
 
-                                            self.chars.pop_while(|ch| ch != '\n');
-                                            self.chars.pop();
-
-                                            continue;
-                                        },
-                                    }
-                                },
-                                None => {
-                                    self.indent = Some(indent);
-                                    1
-                                },
-                            }
-                        },
-                        None => 0,
-                    } + 1;
-
-                    assert!(self.reduce_stack(indent_level).is_none());
-
-                    let current_level = self.stack.len();
-                    let level_diff = indent_level - current_level;
-
-                    // eprintln!("{} {} {}", indent_level, current_level, std::str::from_utf8(&self.chars.bytes[self.chars.byte_offset..]).unwrap());
-
-                    let item_start_marker = self.chars.marker();
-                    let handle_end_marker = match self.chars.peek() {
-                        Some('-') => {
-                            self.chars.advance();
-                            let handle_end_marker = self.chars.marker();
-
-                            self.pop_whitespace();
-
-                            Some(handle_end_marker)
-                        },
-                        _ => None
-                    };
-
-                    let line_item = if let Some(key) = self.accept_key() {
-                        match self.accept_expr(&[]) {
-                            // [-] x: y
-                            Ok(Some(value)) => {
-                                Some(LineItem::MapEntry {
-                                    list: handle_end_marker.is_some(),
-                                    key,
-                                    value,
-                                })
-                            },
-
-                            // [-] x:
-                            Ok(None) => {
-                                Some(LineItem::MapKey {
-                                    list: handle_end_marker.is_some(),
-                                    key,
-                                })
-                            },
-
-                            Err(_) => {
-                                None
-                            },
-                        }
-                    } else if handle_end_marker.is_some() {
-                        match self.accept_expr(&[]) {
-                            // - x
-                            Ok(Some(item)) => {
-                                Some(LineItem::ListItem(item))
-                            },
-
-                            // -
-                            Ok(None) => {
-                                Some(LineItem::ListOpen)
-                            },
-
-                            Err(_) => {
-                                None
-                            },
-                        }
+                    if let Some((index, item)) = current_item {
+                        assert!(self.reduce_stack(index + 1).is_none());
+                        false
                     } else {
-                        None
-                    };
+                        self.errors.push(Error::new(ErrorKind::InvalidIndentSize, Span(line_start_marker, content_start_marker)));
+                        self.accept_line_end(); // TODO: Avoid extraneous chars error
+                        preceding_lines.clear();
 
-                    let item_end_marker = self.chars.marker();
+                        continue;
+                    }
+                },
+                None if indent == 0 => {
+                    true
+                },
+                _ => {
+                    self.errors.push(Error::new(ErrorKind::InvalidIndentSize, Span(line_start_marker, content_start_marker)));
+                    self.accept_line_end();
+                    preceding_lines.clear();
+
+                    continue;
+                },
+            };
+
+            // eprintln!("{} {} {}", indent_level, current_level, std::str::from_utf8(&self.chars.bytes[self.chars.byte_offset..]).unwrap());
+
+            let handle = match self.chars.peek() {
+                Some('-') => {
+                    self.chars.advance();
+                    let handle_end_marker = self.chars.marker();
 
                     self.pop_whitespace();
 
-                    let comment = self.accept_line_end();
+                    Some(ListHandle {
+                        end_marker: handle_end_marker,
+                        item_indent: self.chars.byte_offset - line_start_marker.byte_offset,
+                    })
+                },
+                _ => None,
+            };
 
-                    let line_item = match line_item {
-                        Some(line_item) => line_item,
-                        None => {
-                            continue;
-                        }
-                    };
+            let line_item = if let Some(key) = self.accept_key() {
+                match self.accept_expr(&[]) {
+                    // [-] x: y
+                    Ok(Some(value)) => {
+                        Some(Node::MapEntry {
+                            handle,
+                            key,
+                            value,
+                        })
+                    },
 
-                    match (line_item, self.stack.last_mut(), level_diff) {
-                        // [root]
-                        // -
-                        (LineItem::ListOpen, None, 1) => {
-                            debug_assert!(handle_end_marker.is_some());
+                    // [-] x:
+                    Ok(None) => {
+                        Some(Node::MapKey {
+                            handle,
+                            key,
+                        })
+                    },
 
-                            self.stack.push(StackItem::List {
-                                floating_handle_end_marker: handle_end_marker,
-                                items: Vec::new(),
-                                start_marker: item_start_marker,
-                            });
+                    Err(_) => {
+                        None
+                    },
+                }
+            } else if let Some(handle) = handle {
+                match self.accept_expr(&[]) {
+                    // - x
+                    Ok(Some(item)) => {
+                        Some(Node::ListItem {
+                            handle,
+                            object: item,
+                        })
+                    },
+
+                    // -
+                    Ok(None) => {
+                        Some(Node::ListOpen {
+                            handle,
+                        })
+                    },
+
+                    Err(_) => {
+                        None
+                    },
+                }
+            } else {
+                None
+            };
+
+            let content_end_marker = self.chars.marker();
+
+            self.pop_whitespace();
+
+            let comment = self.accept_line_end();
+            // let mut line_comments = std::mem::replace(&mut preceding_comments, Vec::new());
+
+            let node = match line_item {
+                Some(node) => node,
+                None => {
+                    continue;
+                },
+            };
+
+            match (node, self.stack.last_mut().and_then(|item| Some(&mut item.kind)), nested) {
+                // [root]
+                // -
+                (Node::ListOpen { handle }, None, true) => {
+                    self.stack.push(StackItem {
+                        comments: preceding_lines
+                            .iter()
+                            .filter_map(|(_, comment)| comment.clone())
+                            .collect(),
+                        kind: StackItemKind::List {
+                            floating_handle_end_marker: Some(handle.end_marker),
+                            items: Vec::new(),
+                            start_marker: content_start_marker,
                         },
+                        indent,
+                    });
+                },
 
-                        // - a
-                        // -
-                        (LineItem::ListOpen, Some(StackItem::List { .. }), 0) => {
-                            debug_assert!(handle_end_marker.is_some());
-
-                            self.stack.push(StackItem::List {
-                                floating_handle_end_marker: handle_end_marker,
-                                items: Vec::new(),
-                                start_marker: item_start_marker,
-                            });
+                // - a
+                // -
+                // (LineItem::ListOpen, Some(StackItem { kind: StackItemKind::List { .. }, .. }), false) => {
+                (Node::ListOpen { handle }, Some(StackItemKind::List { .. }), false) => {
+                    self.stack.push(StackItem {
+                        comments: Vec::new(),
+                        kind: StackItemKind::List {
+                            floating_handle_end_marker: Some(handle.end_marker),
+                            items: Vec::new(),
+                            start_marker: content_start_marker,
                         },
+                        indent,
+                    });
+                },
 
-                        // a:
-                        //   - x
-                        //
-                        // [root]
-                        // - x
-                        (LineItem::ListItem(item), Some(StackItem::Map { floating_key: Some(_), .. }) | None, 1) => {
-                            self.stack.push(StackItem::List {
+                // a:
+                //   - x
+                //
+                // [root]
+                // - x
+                (Node::ListItem { handle, object }, Some(StackItemKind::Map { floating_key: Some(_), .. }) | None, true) => {
+                    self.stack.push(StackItem {
+                        comments: Vec::new(),
+                        kind: StackItemKind::List {
+                            floating_handle_end_marker: None,
+                            items: vec![object],
+                            start_marker: content_start_marker,
+                        },
+                        indent,
+                    });
+                },
+
+                // -
+                //   - x
+                (Node::ListItem { object, .. }, Some(StackItemKind::List { floating_handle_end_marker: Some(_), .. }), true) => {
+                    self.stack.push(StackItem {
+                        comments: Vec::new(),
+                        kind: StackItemKind::List {
+                            floating_handle_end_marker: None,
+                            items: vec![object],
+                            start_marker: content_start_marker,
+                        },
+                        indent,
+                    });
+                },
+
+                // - a
+                // - x
+                (Node::ListItem { object, .. }, Some(StackItemKind::List { floating_handle_end_marker: None, items, .. }), false) => {
+                    items.push(object);
+                },
+
+                // a:
+                //   x: y
+                //
+                // [root]
+                // x: y
+                //
+                // a:
+                //   - x: y
+                //
+                // [root]
+                // - x: y
+                (Node::MapEntry { handle, key, value }, Some(StackItemKind::Map { floating_key: Some(_), .. }) | None, true) => {
+                    if handle.is_some() {
+                        self.stack.push(StackItem {
+                            comments: Vec::new(),
+                            kind: StackItemKind::List {
                                 floating_handle_end_marker: None,
-                                items: vec![item],
-                                start_marker: item_start_marker,
-                            });
-                        },
-
-                        // -
-                        //   - x
-                        (LineItem::ListItem(item), Some(StackItem::List { floating_handle_end_marker: Some(_), .. }), 1) => {
-                            self.stack.push(StackItem::List {
-                                floating_handle_end_marker: None,
-                                items: vec![item],
-                                start_marker: item_start_marker,
-                            });
-                        },
-
-                        // - a
-                        // - x
-                        (LineItem::ListItem(item), Some(StackItem::List { floating_handle_end_marker: None, items, .. }), 0) => {
-                            items.push(item);
-                        },
-
-                        // a:
-                        //   x: y
-                        //
-                        // [root]
-                        // x: y
-                        //
-                        // a:
-                        //   - x: y
-                        //
-                        // [root]
-                        // - x: y
-                        (LineItem::MapEntry { key, list, value }, Some(StackItem::Map { floating_key: Some(_), .. }) | None, 1) => {
-                            if list {
-                                self.stack.push(StackItem::List {
-                                    floating_handle_end_marker: None,
-                                    items: Vec::new(),
-                                    start_marker: item_start_marker,
-                                });
-                            }
-
-                            self.stack.push(StackItem::Map {
-                                entries: vec![(key, value)],
-                                floating_key: None,
-                            });
-                        },
-
-                        // - a
-                        // - x: y
-                        (LineItem::MapEntry { key, list: true, value }, Some(StackItem::List { .. }), 0) => {
-                            self.stack.push(StackItem::Map {
-                                entries: vec![(key, value)],
-                                floating_key: None,
-                            });
-                        },
-
-                        // a: b
-                        // x: y
-                        (LineItem::MapEntry { key, list: false, value }, Some(StackItem::Map { entries, floating_key, .. }), 0) => {
-                            debug_assert!(floating_key.is_none());
-                            entries.push((key, value));
-                        },
-
-                        // a: b
-                        // x:
-                        (LineItem::MapKey { key, list: false }, Some(StackItem::Map { ref mut floating_key, .. }), 0) => {
-                            debug_assert!(floating_key.is_none());
-                            *floating_key = Some(key);
-                        },
-
-                        // a:
-                        //   - x:
-                        //
-                        // a:
-                        //   x:
-                        //
-                        // [root]
-                        // x:
-                        //
-                        // [root]
-                        // - x:
-                        (LineItem::MapKey { key, list }, Some(StackItem::Map { floating_key: Some(_), .. }) | None, 1) => {
-                            if list {
-                                self.stack.push(StackItem::List {
-                                    floating_handle_end_marker: None,
-                                    items: Vec::new(),
-                                    start_marker: item_start_marker,
-                                });
-                            }
-
-                            self.stack.push(StackItem::Map {
-                                entries: Vec::new(),
-                                floating_key: Some(key),
-                            });
-                        },
-
-                        (line_item, _, _) => {
-                            eprintln!("Missing: {:#?} {:#?} {:#?}", &line_item, self.stack.last(), level_diff);
-                            self.errors.push(Error::new(ErrorKind::InvalidIndent, Span(item_start_marker, item_end_marker)));
-                        },
+                                items: Vec::new(),
+                                start_marker: content_start_marker,
+                            },
+                            indent,
+                        });
                     }
+
+                    self.stack.push(StackItem {
+                        comments: Vec::new(),
+                        kind: StackItemKind::Map {
+                            entries: vec![(key, value)],
+                            floating_key: None,
+                        },
+                        indent: handle.and_then(|handle| Some(handle.item_indent)).unwrap_or(indent),
+                    });
+                },
+
+                // - a
+                // - x: y
+                (Node::MapEntry { handle: Some(handle), key, value }, Some(StackItemKind::List { .. }), false) => {
+                    self.stack.push(StackItem {
+                        comments: Vec::new(),
+                        kind: StackItemKind::Map {
+                            entries: vec![(key, value)],
+                            floating_key: None,
+                        },
+                        indent: handle.item_indent,
+                    });
+                },
+
+                // a: b
+                // x: y
+                (Node::MapEntry { handle: None, key, value }, Some(StackItemKind::Map { entries, floating_key, .. }), false) => {
+                    debug_assert!(floating_key.is_none());
+                    entries.push((key, value));
+                },
+
+                // a: b
+                // x:
+                (Node::MapKey { handle: None, key }, Some(StackItemKind::Map { ref mut floating_key, .. }), false) => {
+                    debug_assert!(floating_key.is_none());
+                    *floating_key = Some(key);
+                },
+
+                // a:
+                //   - x:
+                //
+                // a:
+                //   x:
+                //
+                // [root]
+                // x:
+                //
+                // [root]
+                // - x:
+                (Node::MapKey { handle, key }, Some(StackItemKind::Map { floating_key: Some(_), .. }) | None, true) => {
+                    if handle.is_some() {
+                        self.stack.push(StackItem {
+                            comments: Vec::new(),
+                            kind: StackItemKind::List {
+                                floating_handle_end_marker: None,
+                                items: Vec::new(),
+                                start_marker: content_start_marker,
+                            },
+                            indent,
+                        });
+                    }
+
+                    self.stack.push(StackItem {
+                        comments: Vec::new(),
+                        kind: StackItemKind::Map {
+                            entries: Vec::new(),
+                            floating_key: Some(key),
+                        },
+                        indent: handle.and_then(|handle| Some(handle.item_indent)).unwrap_or(indent),
+                    });
+                },
+
+                (node, _, _) => {
+                    eprintln!("Missing: {:#?} {:#?} {:#?}", &node, self.stack.last(), nested);
+                    self.errors.push(Error::new(ErrorKind::InvalidIndent, Span(content_start_marker, content_end_marker)));
                 },
             }
 
