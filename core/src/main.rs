@@ -18,13 +18,13 @@ fn main() -> Result<(), ()> {
     // span.format(input, &mut std::io::stdout()).unwrap();
 
     let input = "
-a: b
-c:
-    é
-    e\u{0301}
-    x: [e\u{0301}] e\u{0301} 🇫🇷🤶🏻 # foo
-    f: g
-    # d: e
+
+x:
+  - b: d
+    a:
+      - p
+
+u: v
 ";
 
     let result = pcrl::parse::<pcrl::indexers::Character>(input);

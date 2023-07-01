@@ -338,9 +338,11 @@ pub enum ErrorKind {
     // x: { a
     MissingMapSemicolon,
 
+    // x: { a:
+    MissingCompactMapValue,
+
     // x:
-    // y:
-    MissingMapValue,
+    MissingExpandedMapValue,
 
     // x: 3.4.5
     InvalidScalarLiteral,
@@ -441,7 +443,7 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                     if let Some(value) = self.accept_expr(&[',', '}'])? {
                         items.push((WithSpan { span: key_span, value: key.to_string() }, value));
                     } else {
-                        self.errors.push(Error::new(ErrorKind::MissingMapValue, Span::point(&self.chars.marker())));
+                        self.errors.push(Error::new(ErrorKind::MissingCompactMapValue, Span::point(&self.chars.marker())));
                         return Err(());
                     }
 
@@ -524,7 +526,7 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                         },
                     }
                 },
-                StackItem::Map { entries, floating_key: None, } => {
+                StackItem::Map { entries, floating_key: None } => {
                     Object {
                         span: Span(
                             entries.first().unwrap().0.span.0,
@@ -533,7 +535,17 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                         value: Value::Map(entries),
                     }
                 },
-                _ => todo!(),
+                StackItem::Map { entries, floating_key: Some(floating_key) } => {
+                    self.errors.push(Error::new(ErrorKind::MissingExpandedMapValue, floating_key.span));
+
+                    Object {
+                        span: Span(
+                            entries.first().and_then(|(key, _)| Some(key.span.0)).unwrap_or(floating_key.span.0),
+                            floating_key.span.1,
+                        ),
+                        value: Value::Map(entries),
+                    }
+                },
             };
 
             match self.stack.last_mut() {
@@ -598,6 +610,10 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                                         Some(level) => level,
                                         None => {
                                             self.errors.push(Error::new(ErrorKind::InvalidIndentSize, Span(line_start_marker, self.chars.marker())));
+
+                                            self.chars.pop_while(|ch| ch != '\n');
+                                            self.chars.pop();
+
                                             continue;
                                         },
                                     }
