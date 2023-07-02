@@ -9,6 +9,10 @@ impl<Index: CharIndex> Span<Index> {
         Self(*marker, *marker)
     }
 
+    pub fn contains_index(&self, index: Index) -> bool {
+        (index >= self.0.index) && (index < self.1.index)
+    }
+
     #[cfg(feature = "format")]
     pub fn format(&self, contents: &str, output: &mut dyn std::io::Write) -> std::io::Result<()> {
         use unicode_segmentation::UnicodeSegmentation;
@@ -189,9 +193,9 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
 
 
 #[derive(Debug)]
-struct Context<Index: CharIndex> {
-    comments: Vec<CommentWithGap<Index>>,
-    gap: usize,
+pub struct Context<Index: CharIndex> {
+    pub comments: Vec<CommentWithGap<Index>>,
+    pub gap: usize,
 }
 
 impl<Index: CharIndex> Context<Index> {
@@ -205,10 +209,8 @@ impl<Index: CharIndex> Context<Index> {
 
 #[derive(Debug)]
 pub struct ListItem<Index: CharIndex> {
-    context: Context<Index>,
-    // value: WithSpan<Option<Value<Index>>, Index>,
-    // kind: ListItemKind<Index>,
-    value: Component<Value<Index>, Index>,
+    pub context: Context<Index>,
+    pub value: WithSpan<Value<Index>, Index>,
 }
 
 #[derive(Debug)]
@@ -219,40 +221,10 @@ pub enum ListItemKind<Index: CharIndex> {
 
 #[derive(Debug)]
 pub struct MapEntry<Index: CharIndex> {
-    context: Context<Index>,
-    key: Component<String, Index>,
-    value: Component<Value<Index>, Index>,
+    pub context: Context<Index>,
+    pub key: WithSpan<String, Index>,
+    pub value: WithSpan<Value<Index>, Index>,
 }
-
-#[derive(Debug)]
-pub enum Component<T, Index: CharIndex> {
-    Missing(Span<Index>),
-    Present(WithSpan<T, Index>),
-}
-
-impl<T, Index: CharIndex> Component<T, Index> {
-    fn span(&self) -> Span<Index> {
-        match self {
-            Component::Missing(span) => *span,
-            Component::Present(value) => value.span,
-        }
-    }
-
-    fn to_option<'a>(&'a self) -> Option<&'a WithSpan<T, Index>> {
-        match self {
-            Component::Missing(_) => None,
-            Component::Present(value) => Some(value),
-        }
-    }
-
-    fn into_option(self) -> Option<WithSpan<T, Index>> {
-        match self {
-            Component::Missing(_) => None,
-            Component::Present(value) => Some(value),
-        }
-    }
-}
-
 
 #[derive(Debug)]
 pub enum Value<Index: CharIndex> {
@@ -261,13 +233,17 @@ pub enum Value<Index: CharIndex> {
     Integer(i64),
     List {
         items: Vec<ListItem<Index>>,
+        item_completion_spans: Vec<Span<Index>>,
     },
     Map {
         entries: Vec<MapEntry<Index>>,
+        key_completion_spans: Vec<Span<Index>>,
+        value_completion_spans: Vec<Span<Index>>,
     },
     Null,
     String(String),
 }
+
 
 #[cfg(test)]
 impl<Index: CharIndex> Value<Index> {
@@ -306,7 +282,7 @@ impl<Index: CharIndex> Value<Index> {
                     output.write_fmt(format_args!("{}", value))?;
                 }
             },
-            List { items } => {
+            List { items, .. } => {
                 output.write("[".as_bytes())?;
 
                 for (index, item) in items.iter().enumerate() {
@@ -314,14 +290,12 @@ impl<Index: CharIndex> Value<Index> {
                         output.write(", ".as_bytes())?;
                     }
 
-                    if let Some(value) = item.value.to_option() {
-                        value.value.format_json(output)?;
-                    }
+                    item.value.value.format_json(output)?;
                 }
 
                 output.write("]".as_bytes())?;
             },
-            Map { entries } => {
+            Map { entries, .. } => {
                 output.write("{ ".as_bytes())?;
 
                 for (index, entry) in entries.iter().enumerate() {
@@ -329,9 +303,9 @@ impl<Index: CharIndex> Value<Index> {
                         output.write(", ".as_bytes())?;
                     }
 
-                    Value::String::<Index>(entry.key.to_option().unwrap().value.clone()).format_json(output)?;
+                    Value::String::<Index>(entry.key.value.clone()).format_json(output)?;
                     output.write(": ".as_bytes())?;
-                    entry.value.to_option().unwrap().value.format_json(output)?;
+                    entry.value.value.format_json(output)?;
                 }
 
                 output.write(" }".as_bytes())?;
@@ -491,8 +465,10 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                     return Err(());
                 }
 
-                // Value::List(items)
-                return Err(());
+                Value::List {
+                    items: Vec::new(),
+                    item_completion_spans: Vec::new(),
+                }
             },
             '{' => {
                 self.chars.advance();
@@ -592,14 +568,15 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
 
             let object = match item.kind {
                 StackItemKind::List { floating_handle_end_marker, items, start_marker, .. } => {
-                    match items.iter().rev().find_map(|item| item.value.to_option()) {
-                        Some(value) => {
-                            Component::Present(WithSpan {
-                                span: Span(start_marker, value.span.1),
+                    match items.last() {
+                        Some(item) => {
+                            WithSpan {
+                                span: Span(start_marker, item.value.span.1),
                                 value: Value::List {
+                                    item_completion_spans: Vec::new(),
                                     items,
                                 },
-                            })
+                            }
                         },
                         None => {
                             // The list can only be empty if there is a floating handle.
@@ -609,28 +586,32 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                     }
                 },
                 StackItemKind::Map { entries, floating_key: None, .. } => {
-                    Component::Present(WithSpan {
+                    WithSpan {
                         span: Span(
-                            entries.first().unwrap().key.span().0,
-                            entries.last().unwrap().value.span().1,
+                            entries.first().unwrap().key.span.0,
+                            entries.last().unwrap().value.span.1,
                         ),
                         value: Value::Map {
                             entries,
+                            key_completion_spans: Vec::new(),
+                            value_completion_spans: Vec::new(),
                         },
-                    })
+                    }
                 },
                 StackItemKind::Map { entries, floating_key: Some(floating_key), .. } => {
                     self.errors.push(Error::new(ErrorKind::MissingExpandedMapValue, floating_key.span));
 
-                    Component::Present(WithSpan {
+                    WithSpan {
                         span: Span(
-                            entries.first().and_then(|entry| Some(entry.key.span().0)).unwrap_or(floating_key.span.0),
+                            entries.first().and_then(|entry| Some(entry.key.span.0)).unwrap_or(floating_key.span.0),
                             floating_key.span.1,
                         ),
                         value: Value::Map {
                             entries,
+                            key_completion_spans: Vec::new(),
+                            value_completion_spans: Vec::new(),
                         },
-                    })
+                    }
                 },
             };
 
@@ -641,14 +622,14 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                         value: object,
                     });
                 },
-                Some(StackItemKind::Map { entries, floating_key: ref mut key @ Some(_), next_entry_context }) => {
+                Some(StackItemKind::Map { entries, floating_key: key @ Some(_), next_entry_context }) => {
                     entries.push(MapEntry {
                         context: next_entry_context.take().unwrap(),
-                        key: Component::Present(key.take().unwrap()),
+                        key: key.take().unwrap(),
                         value: object,
                     });
                 },
-                None => { return Some(object.into_option().unwrap()); },
+                None => { return Some(object); },
                 _ => todo!(),
             }
         }
@@ -698,9 +679,9 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                     true
                 },
                 Some(_) => {
-                    let current_item = self.stack.iter().enumerate().find(|(index, item)| item.indent == indent);
+                    let current_item = self.stack.iter().enumerate().find(|(_, item)| item.indent == indent);
 
-                    if let Some((index, item)) = current_item {
+                    if let Some((index, _)) = current_item {
                         assert!(self.reduce_stack(index + 1).is_none());
                         false
                     } else {
@@ -855,7 +836,7 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                             floating_handle_end_marker: None,
                             items: vec![ListItem {
                                 context,
-                                value: Component::Present(object),
+                                value: object,
                             }],
                             next_item_context: None,
                             start_marker: content_start_marker,
@@ -872,7 +853,7 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                             floating_handle_end_marker: None,
                             items: vec![ListItem {
                                 context,
-                                value: Component::Present(object),
+                                value: object,
                             }],
                             next_item_context: None,
                             start_marker: content_start_marker,
@@ -886,7 +867,7 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                 (Node::ListItem { object, .. }, Some(StackItemKind::List { floating_handle_end_marker: None, items, .. }), false) => {
                     items.push(ListItem {
                         context,
-                        value: Component::Present(object),
+                        value: object,
                     });
                 },
 
@@ -921,14 +902,14 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                             entries: vec![
                                 MapEntry {
                                     context: optional_context.unwrap_or(Context::new()),
-                                    key: Component::Present(WithSpan {
+                                    key: WithSpan {
                                         span: key.span,
                                         value: key.value,
-                                    }),
-                                    value: Component::Present(WithSpan {
+                                    },
+                                    value: WithSpan {
                                         span: value.span,
                                         value: value.value,
-                                    }),
+                                    },
                                 }
                             ],
                             floating_key: None,
@@ -949,14 +930,14 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                         kind: StackItemKind::Map {
                             entries: vec![MapEntry {
                                 context: Context::new(),
-                                key: Component::Present(WithSpan {
+                                key: WithSpan {
                                     span: key.span,
                                     value: key.value,
-                                }),
-                                value: Component::Present(WithSpan {
+                                },
+                                value: WithSpan {
                                     span: value.span,
                                     value: value.value,
-                                }),
+                                },
                             }],
                             floating_key: None,
                             next_entry_context: None,
@@ -972,20 +953,20 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
 
                     entries.push(MapEntry {
                         context,
-                        key: Component::Present(WithSpan {
+                        key: WithSpan {
                             span: key.span,
                             value: key.value,
-                        }),
-                        value: Component::Present(WithSpan {
+                        },
+                        value: WithSpan {
                             span: value.span,
                             value: value.value,
-                        }),
+                        },
                     });
                 },
 
                 // a: b
                 // x:
-                (Node::MapKey { handle: None, key }, Some(StackItemKind::Map { ref mut floating_key, next_entry_context, .. }), false) => {
+                (Node::MapKey { handle: None, key }, Some(StackItemKind::Map { floating_key, next_entry_context, .. }), false) => {
                     debug_assert!(floating_key.is_none());
                     *floating_key = Some(key);
                     *next_entry_context = Some(context);
