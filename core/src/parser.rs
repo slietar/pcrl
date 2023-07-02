@@ -140,19 +140,20 @@ impl<Index: CharIndex> Span<Index> {
 enum StackItemKind<Index: CharIndex> {
     List {
         floating_handle_end_marker: Option<Marker<Index>>,
-        items: Vec<Object<Index>>,
+        items: Vec<ListItem<Index>>,
+        next_item_context: Option<Context<Index>>,
         start_marker: Marker<Index>,
     },
     Map {
-        entries: Vec<(WithSpan<String, Index>, Object<Index>)>,
+        entries: Vec<MapEntry<Index>>,
         floating_key: Option<WithSpan<String, Index>>,
+        next_entry_context: Option<Context<Index>>,
     },
     // String(String),
 }
 
 #[derive(Debug)]
 struct StackItem<Index: CharIndex> {
-    comments: Vec<Comment<Index>>,
     kind: StackItemKind<Index>,
     indent: usize,
 }
@@ -188,12 +189,82 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
 
 
 #[derive(Debug)]
+struct Context<Index: CharIndex> {
+    comments: Vec<CommentWithGap<Index>>,
+    gap: usize,
+}
+
+impl<Index: CharIndex> Context<Index> {
+    fn new() -> Self {
+        Self {
+            comments: Vec::new(),
+            gap: 0,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ListItem<Index: CharIndex> {
+    context: Context<Index>,
+    // value: WithSpan<Option<Value<Index>>, Index>,
+    // kind: ListItemKind<Index>,
+    value: Component<Value<Index>, Index>,
+}
+
+#[derive(Debug)]
+pub enum ListItemKind<Index: CharIndex> {
+    Empty(Span<Index>), // Completion span
+    Item(Object<Index>),
+}
+
+#[derive(Debug)]
+pub struct MapEntry<Index: CharIndex> {
+    context: Context<Index>,
+    key: Component<String, Index>,
+    value: Component<Value<Index>, Index>,
+}
+
+#[derive(Debug)]
+pub enum Component<T, Index: CharIndex> {
+    Missing(Span<Index>),
+    Present(WithSpan<T, Index>),
+}
+
+impl<T, Index: CharIndex> Component<T, Index> {
+    fn span(&self) -> Span<Index> {
+        match self {
+            Component::Missing(span) => *span,
+            Component::Present(value) => value.span,
+        }
+    }
+
+    fn to_option<'a>(&'a self) -> Option<&'a WithSpan<T, Index>> {
+        match self {
+            Component::Missing(_) => None,
+            Component::Present(value) => Some(value),
+        }
+    }
+
+    fn into_option(self) -> Option<WithSpan<T, Index>> {
+        match self {
+            Component::Missing(_) => None,
+            Component::Present(value) => Some(value),
+        }
+    }
+}
+
+
+#[derive(Debug)]
 pub enum Value<Index: CharIndex> {
     Bool(bool),
     Float(f64),
     Integer(i64),
-    List(Vec<Object<Index>>),
-    Map(Vec<(WithSpan<String, Index>, Object<Index>)>),
+    List {
+        items: Vec<ListItem<Index>>,
+    },
+    Map {
+        entries: Vec<MapEntry<Index>>,
+    },
     Null,
     String(String),
 }
@@ -235,7 +306,7 @@ impl<Index: CharIndex> Value<Index> {
                     output.write_fmt(format_args!("{}", value))?;
                 }
             },
-            List(items) => {
+            List { items } => {
                 output.write("[".as_bytes())?;
 
                 for (index, item) in items.iter().enumerate() {
@@ -243,22 +314,24 @@ impl<Index: CharIndex> Value<Index> {
                         output.write(", ".as_bytes())?;
                     }
 
-                    item.value.format_json(output)?;
+                    if let Some(value) = item.value.to_option() {
+                        value.value.format_json(output)?;
+                    }
                 }
 
                 output.write("]".as_bytes())?;
             },
-            Map(items) => {
+            Map { entries } => {
                 output.write("{ ".as_bytes())?;
 
-                for (index, (WithSpan { value: key, .. }, Object { value, .. })) in items.iter().enumerate() {
+                for (index, entry) in entries.iter().enumerate() {
                     if index > 0 {
                         output.write(", ".as_bytes())?;
                     }
 
-                    Value::String::<Index>(key.clone()).format_json(output)?;
+                    Value::String::<Index>(entry.key.to_option().unwrap().value.clone()).format_json(output)?;
                     output.write(": ".as_bytes())?;
-                    value.format_json(output)?;
+                    entry.value.to_option().unwrap().value.format_json(output)?;
                 }
 
                 output.write(" }".as_bytes())?;
@@ -330,10 +403,17 @@ pub enum ErrorKind {
     InvalidScalarLiteral,
 }
 
-#[derive(Clone, Debug)]
-pub struct Comment<Index: CharIndex> {
-    span: Span<Index>,
-    value: String,
+// #[derive(Clone, Debug)]
+// pub struct Comment<Index: CharIndex> {
+//     span: Span<Index>,
+//     value: String,
+// }
+
+#[derive(Debug)]
+pub struct CommentWithGap<Index: CharIndex> {
+    comment: WithSpan<String, Index>,
+    indent: usize,
+    gap: usize,
 }
 
 #[derive(Debug)]
@@ -361,6 +441,11 @@ enum Node<Index: CharIndex> {
         value: Object<Index>,
     }
 }
+
+// #[derive(Debug)]
+// struct Node<Index: CharIndex> {
+//     kind: NodeKind<Index>,
+// }
 
 
 impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
@@ -406,7 +491,8 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                     return Err(());
                 }
 
-                Value::List(items)
+                // Value::List(items)
+                return Err(());
             },
             '{' => {
                 self.chars.advance();
@@ -450,7 +536,8 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                     return Err(());
                 }
 
-                Value::Map(items)
+                // Value::Map(items)
+                return Err(());
             },
             '+' if self.chars.pop_constant("+inf") => {
                 Value::Float(f64::INFINITY)
@@ -505,12 +592,14 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
 
             let object = match item.kind {
                 StackItemKind::List { floating_handle_end_marker, items, start_marker, .. } => {
-                    match items.last() {
-                        Some(item) => {
-                            Object {
-                                span: Span(start_marker, item.span.1),
-                                value: Value::List(items),
-                            }
+                    match items.iter().rev().find_map(|item| item.value.to_option()) {
+                        Some(value) => {
+                            Component::Present(WithSpan {
+                                span: Span(start_marker, value.span.1),
+                                value: Value::List {
+                                    items,
+                                },
+                            })
                         },
                         None => {
                             // The list can only be empty if there is a floating handle.
@@ -519,37 +608,47 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                         },
                     }
                 },
-                StackItemKind::Map { entries, floating_key: None } => {
-                    Object {
+                StackItemKind::Map { entries, floating_key: None, .. } => {
+                    Component::Present(WithSpan {
                         span: Span(
-                            entries.first().unwrap().0.span.0,
-                            entries.last().unwrap().1.span.1,
+                            entries.first().unwrap().key.span().0,
+                            entries.last().unwrap().value.span().1,
                         ),
-                        value: Value::Map(entries),
-                    }
+                        value: Value::Map {
+                            entries,
+                        },
+                    })
                 },
-                StackItemKind::Map { entries, floating_key: Some(floating_key) } => {
+                StackItemKind::Map { entries, floating_key: Some(floating_key), .. } => {
                     self.errors.push(Error::new(ErrorKind::MissingExpandedMapValue, floating_key.span));
 
-                    Object {
+                    Component::Present(WithSpan {
                         span: Span(
-                            entries.first().and_then(|(key, _)| Some(key.span.0)).unwrap_or(floating_key.span.0),
+                            entries.first().and_then(|entry| Some(entry.key.span().0)).unwrap_or(floating_key.span.0),
                             floating_key.span.1,
                         ),
-                        value: Value::Map(entries),
-                    }
+                        value: Value::Map {
+                            entries,
+                        },
+                    })
                 },
             };
 
             match self.stack.last_mut().and_then(|item| Some(&mut item.kind)) {
-                Some(StackItemKind::List { items, .. }) => {
-                    items.push(object);
+                Some(StackItemKind::List { items, next_item_context, .. }) => {
+                    items.push(ListItem {
+                        context: next_item_context.take().unwrap(),
+                        value: object,
+                    });
                 },
-                Some(StackItemKind::Map { entries, floating_key: ref mut key @ Some(_) }) => {
-                    let key = std::mem::replace(key, None).unwrap();
-                    entries.push((key, object));
+                Some(StackItemKind::Map { entries, floating_key: ref mut key @ Some(_), next_entry_context }) => {
+                    entries.push(MapEntry {
+                        context: next_entry_context.take().unwrap(),
+                        key: Component::Present(key.take().unwrap()),
+                        value: object,
+                    });
                 },
-                None => return Some(object),
+                None => { return Some(object.into_option().unwrap()); },
                 _ => todo!(),
             }
         }
@@ -558,7 +657,8 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
     }
 
     pub fn parse(&mut self) -> Result<Object<Indexer::Index>, ()> {
-        let mut preceding_lines = Vec::new();
+        let mut comments = Vec::new();
+        let mut gap = 0;
 
         loop {
             // eprintln!("{:?}", std::str::from_utf8(&self.chars.bytes[self.chars.byte_offset..]).unwrap());
@@ -574,8 +674,17 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
             match self.chars.peek() {
                 // Whitespace-only line
                 Some('\n' | '#') | None => {
-                    let comment = self.accept_line_end();
-                    preceding_lines.push((indent, comment));
+                    if let Some(comment) = self.accept_line_end() {
+                        comments.push(CommentWithGap {
+                            comment,
+                            gap,
+                            indent,
+                        });
+
+                        gap = 0;
+                    } else {
+                        gap += 1;
+                    }
 
                     continue;
                 },
@@ -597,7 +706,7 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                     } else {
                         self.errors.push(Error::new(ErrorKind::InvalidIndentSize, Span(line_start_marker, content_start_marker)));
                         self.accept_line_end(); // TODO: Avoid extraneous chars error
-                        preceding_lines.clear();
+                        comments.clear();
 
                         continue;
                     }
@@ -608,7 +717,7 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                 _ => {
                     self.errors.push(Error::new(ErrorKind::InvalidIndentSize, Span(line_start_marker, content_start_marker)));
                     self.accept_line_end();
-                    preceding_lines.clear();
+                    comments.clear();
 
                     continue;
                 },
@@ -631,7 +740,7 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                 _ => None,
             };
 
-            let line_item = if let Some(key) = self.accept_key() {
+            let node = if let Some(key) = self.accept_key() {
                 match self.accept_expr(&[]) {
                     // [-] x: y
                     Ok(Some(value)) => {
@@ -683,10 +792,19 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
 
             self.pop_whitespace();
 
-            let comment = self.accept_line_end();
-            // let mut line_comments = std::mem::replace(&mut preceding_comments, Vec::new());
+            let local_comment = self.accept_line_end();
+            // let content_comments = std::mem::replace(&mut comments, Vec::new());
+            // let content_gap = gap;
+            // gap = 0;
 
-            let node = match line_item {
+            let context = Context {
+                comments: std::mem::replace(&mut comments, Vec::new()),
+                gap,
+            };
+
+            gap = 0;
+
+            let node = match node {
                 Some(node) => node,
                 None => {
                     continue;
@@ -698,11 +816,8 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                 // -
                 (Node::ListOpen { handle }, None, true) => {
                     self.stack.push(StackItem {
-                        comments: preceding_lines
-                            .iter()
-                            .filter_map(|(_, comment)| comment.clone())
-                            .collect(),
                         kind: StackItemKind::List {
+                            next_item_context: Some(context),
                             floating_handle_end_marker: Some(handle.end_marker),
                             items: Vec::new(),
                             start_marker: content_start_marker,
@@ -713,17 +828,20 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
 
                 // - a
                 // -
-                // (LineItem::ListOpen, Some(StackItem { kind: StackItemKind::List { .. }, .. }), false) => {
-                (Node::ListOpen { handle }, Some(StackItemKind::List { .. }), false) => {
-                    self.stack.push(StackItem {
-                        comments: Vec::new(),
-                        kind: StackItemKind::List {
-                            floating_handle_end_marker: Some(handle.end_marker),
-                            items: Vec::new(),
-                            start_marker: content_start_marker,
-                        },
-                        indent,
-                    });
+                (Node::ListOpen { handle }, Some(StackItemKind::List { floating_handle_end_marker, next_item_context, .. }), false) => {
+                    *floating_handle_end_marker = Some(handle.end_marker);
+                    *next_item_context = Some(context);
+
+                    // ??
+                    // self.stack.push(StackItem {
+                    //     kind: StackItemKind::List {
+                    //         next_item_context: None,
+                    //         floating_handle_end_marker: Some(handle.end_marker),
+                    //         items: Vec::new(),
+                    //         start_marker: content_start_marker,
+                    //     },
+                    //     indent,
+                    // });
                 },
 
                 // a:
@@ -733,10 +851,13 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                 // - x
                 (Node::ListItem { handle, object }, Some(StackItemKind::Map { floating_key: Some(_), .. }) | None, true) => {
                     self.stack.push(StackItem {
-                        comments: Vec::new(),
                         kind: StackItemKind::List {
                             floating_handle_end_marker: None,
-                            items: vec![object],
+                            items: vec![ListItem {
+                                context,
+                                value: Component::Present(object),
+                            }],
+                            next_item_context: None,
                             start_marker: content_start_marker,
                         },
                         indent,
@@ -745,12 +866,15 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
 
                 // -
                 //   - x
-                (Node::ListItem { object, .. }, Some(StackItemKind::List { floating_handle_end_marker: Some(_), .. }), true) => {
+                (Node::ListItem { object, .. }, Some(StackItemKind::List { floating_handle_end_marker: Some(_), items, .. }), true) => {
                     self.stack.push(StackItem {
-                        comments: Vec::new(),
                         kind: StackItemKind::List {
                             floating_handle_end_marker: None,
-                            items: vec![object],
+                            items: vec![ListItem {
+                                context,
+                                value: Component::Present(object),
+                            }],
+                            next_item_context: None,
                             start_marker: content_start_marker,
                         },
                         indent,
@@ -760,7 +884,10 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                 // - a
                 // - x
                 (Node::ListItem { object, .. }, Some(StackItemKind::List { floating_handle_end_marker: None, items, .. }), false) => {
-                    items.push(object);
+                    items.push(ListItem {
+                        context,
+                        value: Component::Present(object),
+                    });
                 },
 
                 // a:
@@ -775,10 +902,12 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                 // [root]
                 // - x: y
                 (Node::MapEntry { handle, key, value }, Some(StackItemKind::Map { floating_key: Some(_), .. }) | None, true) => {
+                    let mut optional_context = Some(context);
+
                     if handle.is_some() {
                         self.stack.push(StackItem {
-                            comments: Vec::new(),
                             kind: StackItemKind::List {
+                                next_item_context: optional_context.take(),
                                 floating_handle_end_marker: None,
                                 items: Vec::new(),
                                 start_marker: content_start_marker,
@@ -788,23 +917,49 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                     }
 
                     self.stack.push(StackItem {
-                        comments: Vec::new(),
                         kind: StackItemKind::Map {
-                            entries: vec![(key, value)],
+                            entries: vec![
+                                MapEntry {
+                                    context: optional_context.unwrap_or(Context::new()),
+                                    key: Component::Present(WithSpan {
+                                        span: key.span,
+                                        value: key.value,
+                                    }),
+                                    value: Component::Present(WithSpan {
+                                        span: value.span,
+                                        value: value.value,
+                                    }),
+                                }
+                            ],
                             floating_key: None,
+                            next_entry_context: None,
                         },
-                        indent: handle.and_then(|handle| Some(handle.item_indent)).unwrap_or(indent),
+                        indent: handle
+                            .and_then(|handle| Some(handle.item_indent))
+                            .unwrap_or(indent),
                     });
                 },
 
                 // - a
                 // - x: y
-                (Node::MapEntry { handle: Some(handle), key, value }, Some(StackItemKind::List { .. }), false) => {
+                (Node::MapEntry { handle: Some(handle), key, value }, Some(StackItemKind::List { next_item_context, .. }), false) => {
+                    *next_item_context = Some(context);
+
                     self.stack.push(StackItem {
-                        comments: Vec::new(),
                         kind: StackItemKind::Map {
-                            entries: vec![(key, value)],
+                            entries: vec![MapEntry {
+                                context: Context::new(),
+                                key: Component::Present(WithSpan {
+                                    span: key.span,
+                                    value: key.value,
+                                }),
+                                value: Component::Present(WithSpan {
+                                    span: value.span,
+                                    value: value.value,
+                                }),
+                            }],
                             floating_key: None,
+                            next_entry_context: None,
                         },
                         indent: handle.item_indent,
                     });
@@ -814,14 +969,26 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                 // x: y
                 (Node::MapEntry { handle: None, key, value }, Some(StackItemKind::Map { entries, floating_key, .. }), false) => {
                     debug_assert!(floating_key.is_none());
-                    entries.push((key, value));
+
+                    entries.push(MapEntry {
+                        context,
+                        key: Component::Present(WithSpan {
+                            span: key.span,
+                            value: key.value,
+                        }),
+                        value: Component::Present(WithSpan {
+                            span: value.span,
+                            value: value.value,
+                        }),
+                    });
                 },
 
                 // a: b
                 // x:
-                (Node::MapKey { handle: None, key }, Some(StackItemKind::Map { ref mut floating_key, .. }), false) => {
+                (Node::MapKey { handle: None, key }, Some(StackItemKind::Map { ref mut floating_key, next_entry_context, .. }), false) => {
                     debug_assert!(floating_key.is_none());
                     *floating_key = Some(key);
+                    *next_entry_context = Some(context);
                 },
 
                 // a:
@@ -836,12 +1003,14 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                 // [root]
                 // - x:
                 (Node::MapKey { handle, key }, Some(StackItemKind::Map { floating_key: Some(_), .. }) | None, true) => {
+                    let mut optional_context = Some(context);
+
                     if handle.is_some() {
                         self.stack.push(StackItem {
-                            comments: Vec::new(),
                             kind: StackItemKind::List {
                                 floating_handle_end_marker: None,
                                 items: Vec::new(),
+                                next_item_context: optional_context.take(),
                                 start_marker: content_start_marker,
                             },
                             indent,
@@ -849,10 +1018,10 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                     }
 
                     self.stack.push(StackItem {
-                        comments: Vec::new(),
                         kind: StackItemKind::Map {
                             entries: Vec::new(),
                             floating_key: Some(key),
+                            next_entry_context: optional_context.or(Some(Context::new())),
                         },
                         indent: handle.and_then(|handle| Some(handle.item_indent)).unwrap_or(indent),
                     });
@@ -871,7 +1040,7 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
         self.reduce_stack(0).ok_or(())
     }
 
-    fn accept_line_end(&mut self) -> Option<Comment<Indexer::Index>> {
+    fn accept_line_end(&mut self) -> Option<WithSpan<String, Indexer::Index>> {
         self.pop_whitespace();
 
         match self.chars.peek() {
@@ -880,16 +1049,17 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                 None
             },
             Some('#') => {
-                let comment_start_marker = self.chars.marker();
-
+                self.chars.advance();
                 self.pop_whitespace();
+
+                let comment_start_marker = self.chars.marker();
                 let value = self.chars.pop_while(|ch| ch != '\n').to_string();
 
                 let comment_end_marker = self.chars.marker();
 
                 self.chars.pop();
 
-                Some(Comment {
+                Some(WithSpan {
                     span: Span(comment_start_marker, comment_end_marker),
                     value,
                 })
