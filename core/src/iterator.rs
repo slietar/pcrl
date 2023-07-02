@@ -9,8 +9,8 @@ pub trait CharIndexer: Clone + std::fmt::Debug {
     fn export(&mut self, string: &str) -> Self::Index;
 }
 
-pub trait CharIndex: Clone + Copy + std::fmt::Debug { }
-impl<T: Clone + Copy + std::fmt::Debug> CharIndex for T {}
+pub trait CharIndex: Copy + Ord + std::fmt::Debug { }
+impl<T: Copy + Ord + std::fmt::Debug> CharIndex for T {}
 
 
 #[derive(Debug)]

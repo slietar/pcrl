@@ -1,6 +1,15 @@
 use crate::iterator::CharIndexer;
 
 
+// Used by multiple indexers
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LineColumnIndex {
+    pub column: usize,
+    pub line: usize,
+}
+
+
+
 #[derive(Clone, Debug)]
 pub struct Empty {
 
@@ -82,10 +91,16 @@ impl CharIndexer for CharacterLineColumn {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct LineColumnIndex {
-    pub column: usize,
-    pub line: usize,
+impl Ord for LineColumnIndex {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.line, self.column).cmp(&(other.line, other.column))
+    }
+}
+
+impl PartialOrd for LineColumnIndex {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        (self.line, self.column).partial_cmp(&(other.line, other.column))
+    }
 }
 
 
@@ -112,44 +127,53 @@ impl CharIndexer for UTF16 {
 }
 
 
-// #[derive(Clone, Copy, Debug)]
-// pub struct LspUtf16 {
-//     carriage_return: bool,
-//     pub column: usize,
-//     pub line: usize,
-// }
+#[derive(Clone, Copy, Debug)]
+pub struct LspUtf16 {
+    carriage_return: bool,
+    pub column: usize,
+    pub line: usize,
+}
 
-// impl CharIndexer for LspUtf16 {
-//     fn new() -> Self {
-//         Self {
-//             carriage_return: false,
-//             column: 0,
-//             line: 0,
-//         }
-//     }
+impl CharIndexer for LspUtf16 {
+    type Index = LineColumnIndex;
 
-//     fn consume(&mut self, ch: char) {
-//         match (ch, self.carriage_return) {
-//             ('\n', false) => {
-//                 self.column = 0;
-//                 self.line += 1;
-//             },
-//             ('\n', true) => {
-//                 self.carriage_return = false;
-//             },
-//             ('\r', _) => {
-//                 self.carriage_return = true;
-//                 self.column = 0;
-//                 self.line += 1;
-//             },
-//             _ => {
-//                 let mut buf = [0u16; 2];
-//                 let result = ch.encode_utf16(&mut buf);
-//                 self.column += result.len();
-//             }
-//         }
-//     }
-// }
+    fn new() -> Self {
+        Self {
+            carriage_return: false,
+            column: 0,
+            line: 0,
+        }
+    }
+
+    fn consume(&mut self, ch: char) {
+        match (ch, self.carriage_return) {
+            ('\n', false) => {
+                self.column = 0;
+                self.line += 1;
+            },
+            ('\n', true) => {
+                self.carriage_return = false;
+            },
+            ('\r', _) => {
+                self.carriage_return = true;
+                self.column = 0;
+                self.line += 1;
+            },
+            _ => {
+                let mut buf = [0u16; 2];
+                let result = ch.encode_utf16(&mut buf);
+                self.column += result.len();
+            }
+        }
+    }
+
+    fn export(&mut self, _: &str) -> Self::Index {
+        Self::Index {
+            column: self.column,
+            line: self.line,
+        }
+    }
+}
 
 
 // #[cfg(feature = "format")]
