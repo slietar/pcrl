@@ -1,47 +1,74 @@
 use crate::parser::*;
 use crate::iterator::CharIndex;
+use crate::result::*;
+use crate::span::WithSpan;
 
 
 #[derive(Debug)]
 pub enum FindResult<'a, Index: CharIndex> {
     MapKey {
-        entry: &'a MapEntry<Index>,
+        entry: &'a ExpandedMapEntry<Index>,
+        path: FindPath<'a>,
     },
     Value {
-        object: &'a Object<Index>,
+        object: &'a WithSpan<ExpandedValue<Index>, Index>,
+        path: FindPath<'a>,
     },
 }
 
-pub fn find<'a, Index: CharIndex>(result: &'a ParseResult<Index>, index: Index) -> Option<FindResult<'a, Index>> {
-    // match result.object
-    let mut current_object = result.object.as_ref().unwrap();
 
-    if !current_object.span.contains_index(index) {
+#[derive(Debug)]
+pub enum FindPathItem<'a> {
+    ListIndex(usize),
+    MapKey(&'a str),
+}
+
+type FindPath<'a> = Vec<FindPathItem<'a>>;
+
+
+pub fn find<'a, Index: CharIndex>(result: &'a ParseResult<Index>, index: Index, include_end: bool) -> Option<FindResult<'a, Index>> {
+    let mut current_object = result.object.as_ref().unwrap();
+    let mut path = FindPath::new();
+
+    if !current_object.span.contains_index(index, include_end) {
         return None;
     }
 
-    loop {
+    'b: loop {
         match &current_object.value {
-            Value::Map { entries, .. } => {
-                for entry in entries {
-                    if entry.key.span.contains_index(index) {
-                        return Some(FindResult::MapKey {
-                            entry,
-                        });
-                    }
-
-                    if entry.value.span.contains_index(index) {
-                        current_object = &entry.value;
-                        continue;
+            ExpandedValue::List { items, .. } => {
+                for (item_index, item) in items.iter().enumerate() {
+                    if item.value.span.contains_index(index, include_end) {
+                        current_object = &item.value;
+                        path.push(FindPathItem::ListIndex(item_index));
+                        continue 'b;
                     }
                 }
             },
-            Value::Integer(_) | Value::Float(_) | Value::String(_) | Value::Bool(_) | Value::Null => {
+            ExpandedValue::Map { entries, .. } => {
+                for entry in entries {
+                    if entry.key.span.contains_index(index, include_end) {
+                        return Some(FindResult::MapKey {
+                            entry,
+                            path,
+                        });
+                    }
+
+                    if entry.value.span.contains_index(index, include_end) {
+                        current_object = &entry.value;
+                        path.push(FindPathItem::MapKey(&entry.key.value));
+
+                        continue 'b;
+                    }
+                }
+            },
+            ExpandedValue::Compact(CompactValue::Integer(_) | CompactValue::Float(_) | CompactValue::String(_) | CompactValue::Bool(_) | CompactValue::Null) => {
                 return Some(FindResult::Value {
                     object: current_object,
+                    path,
                 });
             },
-            _ => (),
+            _ => todo!(),
         }
 
         return None;

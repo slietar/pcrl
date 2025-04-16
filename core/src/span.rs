@@ -9,8 +9,8 @@ impl<Index: CharIndex> Span<Index> {
         Self(*marker, *marker)
     }
 
-    pub fn contains_index(&self, index: Index) -> bool {
-        (index >= self.0.index) && (index < self.1.index)
+    pub fn contains_index(&self, index: Index, include_end: bool) -> bool {
+        (index >= self.0.index) && ((index < self.1.index) || (include_end && (index == self.1.index)))
     }
 
     #[cfg(feature = "format")]

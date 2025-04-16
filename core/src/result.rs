@@ -13,7 +13,7 @@ pub struct MultilineStringLine<Index: CharIndex> {
 
 #[derive(Debug)]
 pub struct StandaloneComment<Index: CharIndex> {
-    pub comment: WithSpan<String, Index>,
+    pub contents: WithSpan<String, Index>,
     pub indent: usize,
     pub gap: usize,
 }
@@ -83,6 +83,34 @@ pub enum ExpandedValue<Index: CharIndex> {
     },
 }
 
+impl<Index: CharIndex> std::convert::From<ExpandedValue<Index>> for RegularValue {
+    fn from(value: ExpandedValue<Index>) -> Self {
+        use ExpandedValue::*;
+
+        match value {
+            Compact(value) =>
+                value.into(),
+            List { items, .. } =>
+                RegularValue::List(
+                    items
+                        .into_iter()
+                        .map(|item| item.value.value.into())
+                        .collect()
+                ),
+            Map { entries, .. } =>
+                RegularValue::Map(
+                    entries
+                        .into_iter()
+                        .map(|entry| (entry.key.value, entry.value.value.into()))
+                        .collect()
+                ),
+            String { string, .. } =>
+                RegularValue::String(string),
+        }
+    }
+}
+
+
 #[derive(Debug)]
 pub enum CompactValue<Index: CharIndex> {
     Bool(bool),
@@ -135,6 +163,7 @@ impl<Index: CharIndex> std::convert::From<CompactValue<Index>> for RegularValue 
 }
 
 
+#[derive(Debug)]
 pub enum RegularValue {
     Bool(bool),
     Float(f64),

@@ -47,7 +47,7 @@ impl CharIndexer for Character {
         Self { position: 0 }
     }
 
-    fn consume(&mut self, ch: char) {
+    fn consume(&mut self, _: char) {
 
     }
 

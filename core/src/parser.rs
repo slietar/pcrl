@@ -21,6 +21,7 @@ enum StackItemKind<Index: CharIndex> {
 
 #[derive(Debug)]
 struct StackItem<Index: CharIndex> {
+    indent: usize,
     kind: StackItemKind<Index>,
 }
 
@@ -368,7 +369,7 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                 Some('\n' | '#') | None => {
                     if let Some(comment) = self.accept_line_end() {
                         comments.push(StandaloneComment {
-                            comment,
+                            contents: comment,
                             gap,
                             indent,
                         });
@@ -515,6 +516,7 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                             items: Vec::new(),
                             start_marker: content_start_marker,
                         },
+                        indent,
                     });
                 },
 
@@ -541,7 +543,9 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                 //
                 // [root]
                 // - x
-                (Node::ListItem { handle, object }, Some(StackItemKind::Map { floating_key: Some(_), .. }) | None, true) => {
+                //
+                // TODO: Relax to allow unnested
+                (Node::ListItem { object, .. }, Some(StackItemKind::Map { floating_key: Some(_), .. }) | None, true) => {
                     self.stack.push(StackItem {
                         kind: StackItemKind::List {
                             floating_handle_end_marker: None,
@@ -553,12 +557,13 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                             next_item_context: None,
                             start_marker: content_start_marker,
                         },
+                        indent,
                     });
                 },
 
                 // -
                 //   - x
-                (Node::ListItem { object, .. }, Some(StackItemKind::List { floating_handle_end_marker: Some(_), items, .. }), true) => {
+                (Node::ListItem { object, .. }, Some(StackItemKind::List { floating_handle_end_marker: Some(_), .. }), true) => {
                     self.stack.push(StackItem {
                         kind: StackItemKind::List {
                             floating_handle_end_marker: None,
@@ -570,6 +575,7 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                             next_item_context: None,
                             start_marker: content_start_marker,
                         },
+                        indent,
                     });
                 },
 
@@ -605,8 +611,14 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                                 items: Vec::new(),
                                 start_marker: content_start_marker,
                             },
+                            indent,
                         });
                     }
+
+                    let map_indent = handle
+                        .as_ref()
+                        .and_then(|handle| Some(handle.item_indent))
+                        .unwrap_or(indent);
 
                     self.stack.push(StackItem {
                         kind: StackItemKind::Map {
@@ -618,19 +630,14 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                                             .and_then(|handle| Some(handle.item_indent))
                                             .unwrap_or(indent)
                                     )),
-                                    key: WithSpan {
-                                        span: key.span,
-                                        value: key.value,
-                                    },
-                                    value: WithSpan {
-                                        span: value.span,
-                                        value: value.value,
-                                    },
+                                    key,
+                                    value,
                                 }
                             ],
                             floating_key: None,
                             next_entry_context: None,
                         },
+                        indent: map_indent,
                     });
                 },
 
@@ -653,6 +660,7 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                             floating_key: None,
                             next_entry_context: None,
                         },
+                        indent,
                     });
                 },
 
@@ -705,17 +713,26 @@ impl<'a, Indexer: CharIndexer> Parser<'a, Indexer> {
                                 next_item_context: optional_context.take(),
                                 start_marker: content_start_marker,
                             },
+                            indent,
                         });
                     }
+
+                    let map_indent = optional_context
+                        .as_ref()
+                        .and_then(|context| Some(context.indent))
+                        .unwrap_or(indent);
 
                     self.stack.push(StackItem {
                         kind: StackItemKind::Map {
                             entries: Vec::new(),
                             floating_key: Some(key),
                             next_entry_context: optional_context.or(Some(Context::new(
-                                handle.and_then(|handle| Some(handle.item_indent)).unwrap_or(indent)
+                                handle
+                                    .and_then(|handle| Some(handle.item_indent))
+                                    .unwrap_or(indent)
                             ))),
                         },
+                        indent: map_indent,
                     });
                 },
 
